@@ -126,6 +126,8 @@ object Feedback {
             put("backend", profile.backendState)
             put("backendMessage", profile.backendMessage)
             put("bandHz", profile.bandHz)
+            // Which stages exist in the chain, not just whether the curve landed.
+            put("stages", profile.stages)
         }.toString()
 
         try {

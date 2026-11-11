@@ -1,8 +1,9 @@
 # 音频模块（AURORA）· CONTEXT
 
-一句话摘要：这是一个用 LSPosed 注入 system_server、按**正在播放的音频会话**逐个挂载 DynamicsProcessing 软件均衡器、在音轨末端叠加六段曲线（80/200/500/1.5k/4k/10k Hz）的 Android 调音模块；当前版本 **1.3.1**（versionCode 1301），仓库 shisjsji/AURORA。
+一句话摘要：这是一个用 LSPosed 注入 system_server、按**正在播放的音频会话**逐个挂载 DynamicsProcessing 软件均衡器、在音轨末端叠加六段曲线（80/200/500/1.5k/4k/10k Hz）的 Android 调音模块；当前版本 **1.3.3**（versionCode 1303），仓库 shisjsji/AURORA。
 
 > **本文件已于 2026-11-06 按 1.2.0 重写。** 旧版描述的「Dolby DAX3 `dap_hw` + 20 段 GEQ + AudioEffect 厂商参数通道」路线**已整体废弃**，对应代码 `DolbyDap.java` 已删除。若在别处读到 v1.5.0、20 段、`aurora_geq` 之外还带 profile 的说法，一律以本文件为准。
+> **1.3.3 变更**：引擎改为自己描述处理链架构——通过反射 `DynamicsProcessing.Config.Builder` 把 pre-EQ 段数从平台默认 6 提到 10（精确模式再配 20 ms 帧，FFT 512→1024 点，bin 93.75→46.9 Hz），并在开启时重建效果器；6 段设置语义完全不变，引擎内部把 6 段曲线按对数频率插值扩到 N 段。按路由分参数：耳机/蓝牙把声场宽度与感知响度补偿降到 60%，200 Hz 天花板 4→6 dB。新键 `aurora_precise`，默认关（+10 ms 延迟）。
 > **1.3.1 变更**：修复 Limiter 反射构造器签名错误——此前限幅器从未生效，所有设备实际跑的是 AOSP 默认的 −2 dBFS/10:1 砖墙，是破音/炸音的主要来源；新增设备适配包机制（服务器 devices.json → App 匹配写入 aurora_device_pack → 引擎逐 tick 消费，频点被拒自动回退 250–6.3 kHz）；设备档案回报 backend 写入状态。
 > **1.3.0 变更**：界面按 DESIGN.md 整体重做（token 体系、miuix 分组与原生滑杆、液态玻璃只留在 Dock），新增声场宽度与感知响度两个参数、滑杆「恢复默认」、小屏紧凑模式；旧 Magisk 路线与 20 段 GEQ 描述均为历史。本文件里凡写「250–6300 Hz」的段落，频点以代码 AudioEq.BAND_HZ 为准。
 
@@ -75,10 +76,10 @@ App 会话  ──▶  系统混音  ──▶  AURORA（DynamicsProcessing preE
 
 **线程模型**：`HandlerThread("aurora-engine", Process.THREAD_PRIORITY_BACKGROUND)`，tick、Probe、ContentObserver 回调全部 post 到这个线程的 Handler 上。`HOOKED` / `STARTED` 两个 `AtomicBoolean` 各自 CAS 防重入（证据：AuroraXposed.java — 类注释 "The audio effect calls block in the HAL. Running them on the system_server main looper makes the watchdog kill the system process, so nothing here ever touches the main thread."）。
 
-**配置通道**：App 与 system_server 不共享进程，靠 `Settings.Global` 全局键通信，`ContentObserver` 监听六个键，`onChange` 里 `removeCallbacks(TICK)` 后立即 `post(TICK)`，等效一次即时 tick。
+**配置通道**：App 与 system_server 不共享进程，靠 `Settings.Global` 全局键通信，`ContentObserver` 监听全部输入键（含 `aurora_spread`、`aurora_loudness`、`aurora_geq_saved`、`aurora_device_pack`），`onChange` 里 `removeCallbacks(TICK)` 后立即 `post(TICK)`，等效一次即时 tick。
 
 - 输入键：`aurora_enabled`、`aurora_panic`、`aurora_preset`、`aurora_strength`（0–100）、`aurora_geq`（当前曲线）、`aurora_geq_saved`（用户自存曲线，切预设不丢）、`aurora_selftest`（token）。
-- 回执键：`aurora_backend_state`、`_message`、`_bands`、`_sessions`、`_applied`、`_updated`，另有 `aurora_backend_log`（最近 30 条状态变更，供反馈表单随件带走）和 `aurora_engine_version`（system_server 里那份代码的 versionCode）。
+- 回执键：`aurora_backend_state`、`_message`、`_bands`、`_sessions`、`_applied`、`_updated`、`_stages`（`bands=6/6 limiter=ok mbc=ok loudness=ok verify=ok`，反射写入的真实成败），另有 `aurora_backend_log`（最近 30 条状态变更，供反馈表单随件带走）和 `aurora_engine_version`（system_server 里那份代码的 versionCode）。
 - 量纲：曲线在 `Settings` 里按**十分之一 dB 的整数**存取（`aurora_geq = "110,90,-30,..."`），避免浮点在字符串往返中失真；回执 `_bands` 同样是十分之一 dB（证据：AuroraEngine.java — `parseCurve` 与 `join(float[])`）。
 
 **`AudioEq` 的反射封装**：`resolve()` 一次性拿齐 `DynamicsProcessing`、`DynamicsProcessing$EqBand` 的构造器与 `setPreEqBandAllChannelsTo` / `setEnabled` / `hasControl` / `release`，失败缓存 `resolveError` 不重复抛。`open(session)` 拒绝 `session <= 0`，构造 `DynamicsProcessing(0, session)`，从 `getPreEqByChannelIndex(0).getBandCount()` 读真实段数，`hasControl()` 为真且段数大于 0 才算成功。`apply()` 只写前 `min(真实段数, 6, 增益数组长度)` 段，多出来的段**故意不动**——默认平直，若全停到最后一个频点会叠出一堆本不想要的滤波器（证据：AudioEq.java — "Surplus bands are left untouched"）。
@@ -125,7 +126,7 @@ stage 语义（证据：DeviceProfile.kt — `stageLabel()`）：`0` 链路可�
 
 1. **放弃 Dolby DAP，改驱动 AOSP 软件均衡器**。Dolby 在这条链路上只当控制面，参数写了不处理音频；`DynamicsProcessing` 是真正跑在混音链上的软件级，普通路径与 spatializer 路径都生效。
 2. **按播放会话挂，不挂 session 0 / 全局混音**。空间音频把音乐切到 `AudioOut_5D` 的 per-session 效果链，全局链上根本没有音频流经过。
-3. **每个新会话延迟一拍再挂效果器**。MiSound 在音轨开始时重建整条效果链，第一拍建的效果器会被孤悬——链上还在、`Enabled=y`，但不出声。所以第一次看到只登记，下一拍才 `open()`，而不是建了再拆（见决策 16）。
+3. **每个会话只建一个效果器，首次看到即 `open()`**。MiSound 在音轨开始时重建整条效果链，建在重建之前的效果器会被孤悬——链上还在、`Enabled=y`，但不出声。现在由 `registerAudioPlaybackCallback` 在音轨建立后才交出会话（60 ms 去抖），因此"拿到即挂"已经处在重建之后；之后只改参数、不重建，避免换歌断音（见决策 16）。
 4. **频段从 20 段收成六段**。20 段是 Dolby 的能力，不是扬声器的能力；六段落在真正能还原的窗口里，每段都有可听效果。
 5. **曲线等比缩放 + 预衰减，不减均值**。减均值抹平预设倾斜，九套会听起来一样；保形状、只降绝对电平才是对的选择。
 6. **抬升上限 6 dB，衰减放到 12 dB**。手机扬声器满音量已接近削顶，+12 dB 只会听起来"破"，不会更响。
@@ -137,8 +138,8 @@ stage 语义（证据：DeviceProfile.kt — `stageLabel()`）：`0` 链路可�
 12. **自检用"全频 −12 dB 持续 6 秒"**。听感上一强一弱就说明链路通，比看任何回执都直接。
 13. **不保留场景页**。那些参数只存在于 Dolby 通道，软件均衡器上没有对应物，留着就是假开关。
 14. **用户曲线单独存一份**。`aurora_geq_saved` 与 `aurora_geq` 分开，切预设清空当前曲线但不丢用户手调的曲线。
-15. **状态回执按签名去重**。`report()` 先把 state+message+bands+applied+sessions 拼成签名，与上次相同就直接返回，避免每 2 秒往 `Settings` 里写一遍同样的东西。
-16. **延迟首建，而不是建了再拆**。旧实现第一拍建效果器、第二拍拆掉重建，为的是躲开 MiSound 重建效果链，但代价是每个新音轨 release 一次，听感就是换歌/刷短视频时的断音。改成"第一次只登记、第二次才创建"，同样避开孤悬，且全程只有一次 open。
+15. **状态回执按签名去重**。`report()` 先把 state+message+bands+applied+sessions+stages 拼成签名，与上次相同就直接返回，避免每 2 秒往 `Settings` 里写一遍同样的东西。`stages`（limiter/mbc/loudness/bands 的实际结果）必须进签名，否则限幅器某一刻掉线不会触发写入，问题正好被去重掩盖。
+16. **首建之后只改参数，不建了再拆**。旧实现第一拍建效果器、第二拍 `close()` 后重建，为的是躲开 MiSound 重建效果链，代价是每个新音轨 release 一次，听感就是换歌/刷短视频时的断音。现在改为 `registerAudioPlaybackCallback` 驱动：回调在音轨建立后才触发，第一次看到就 `open()`，全程只 open 一次。
 17. **配置写入合批 150 ms**。保存一次设置要连写四个 `aurora_*` 键，逐条触发 tick 会让引擎读到半更新配置、连发几条中间曲线。观察者改为 `postDelayed(TICK, 150)`，合并成一次。
 18. **削顶用 limiter 解决，不靠继续降增益**。降峰值会牺牲预设差异；limiter 只在越界时压峰，既保住曲线形状又不再数字削顶，同时把"开沉浸声有杂音"这条路一并治了。
 
@@ -148,8 +149,8 @@ stage 语义（证据：DeviceProfile.kt — `stageLabel()`）：`0` 链路可�
 - **挂 session 0 完全没声音变化**。曾以为全局输出混音就是唯一入口，实测被 spatializer 的 per-session 链绕过。
 - **Dolby DAP 写入成功但听感无变化**。诊断页测试音有明显区别、音效页放音乐完全无区别，写入返回成功。根因：Dolby 在 spatializer 链路上只是控制面，参数能写不处理音频。修法：整条路线换成 `DynamicsProcessing`。
 - **空间音频效果器创建报 `-3`**。Dolby 效果器在空间音频链路上创建直接失败（未实现厂商参数通道）。同一个决策的另一个证据。
-- **第一拍建的效果器被挂空**。现象：链上还在、`Enabled=y`、就是不出声。根因：MiSound 在音轨开始时重建效果链，第一个 tick 创建的效果器挂到临时链上随后孤悬。修法：第一次看到会话时不要建它，等下一拍链路稳定再挂，全程只创建一次（见决策 3、16）。
-- **每个新会话被建了两次效果器（1.2.0 及以前）**。现象：换歌、刚进抖音、每刷一个视频都有断音。根因：第一拍建、第二拍 `close()` 后重建，release 会拆链。修法：改成延迟首建，全程只 open 一次（见决策 16）。
+- **第一拍建的效果器被挂空**。现象：链上还在、`Enabled=y`、就是不出声。根因：MiSound 在音轨开始时重建效果链，建在重建之前的效果器挂到临时链上随后孤悬。当时的修法是"第一次只登记、下一拍再建"；现在由 `registerAudioPlaybackCallback` 保证回调发生在音轨建立之后，首次看到即挂即可，全程仍只创建一次（见决策 3、16）。
+- **每个新会话被建了两次效果器（1.2.0 及以前）**。现象：换歌、刚进抖音、每刷一个视频都有断音。根因：第一拍建、第二拍 `close()` 后重建，release 会拆链。修法：首建之后只改参数、不再 close 重建，全程只 open 一次（见决策 16）。
 - **减均值归一化让九套预设听起来一样**。根因：倾斜型曲线减完均值后差异被压平。修法：等比缩放保形状，另加 6 dB 抬升上限做预衰减。
 - **`points` 数组越界导致 App 闪退**。`points` 只有 20 个元素，按 `i * 2` 索引需要 40 个。修法：修正索引与数组长度后重编。
 - **多写段数会叠出多余滤波器**。`DynamicsProcessing` 的段数与我们的频段表不一定相等，若把多余段全按到最后一个频点，等于叠了一串没打算要的滤波器。修法：只写认得的段，其余不动。
@@ -169,10 +170,10 @@ stage 语义（证据：DeviceProfile.kt — `stageLabel()`）：`0` 链路可�
 ## 6. 当前待办
 
 1. **真机听感复核**。九套预设 + 本轮三项修复（沉浸声杂音、刷视频断音、切预设抖动）都要上机确认；仓库里没有听感复核记录。
-2. **延迟首建带来的最多一拍空窗**。现在每个新会话要等下一拍（≤2 s）才挂上效果器，不再有断音但起播时仍有一小段无 EQ。可选方向：缩短轮询或改监听 `registerAudioPlaybackCallback`。
+2. **起播瞬间的空窗**。旧版靠 2 s 轮询，新会话最多等一拍才有 EQ；现已改用 `registerAudioPlaybackCallback`（60 ms 去抖），空窗缩短到几十毫秒，尚未上机复核听感。
 3. **非小米机型适配**。兼容路径只有 probe 的六个检查点，没有针对其它品牌音频链路的特判；`stage` 报回来之后如何映射成具体适配动作还没写。
 4. **limiter 参数待真机校准**。阈值 −1 dBFS、attack 5 ms、release 60 ms、ratio 10 是保守起点；若低频出现"抽吸感"，说明 release 偏长或 ratio 偏狠。
-5. **`aurora_geq_saved` 未注册观察者**。`observe()` 只监听六个键，它不在其中；目前靠下一次 tick 顺带反映，行为正确但依赖隐式时序。
+5. **回读校验只在支持的机型上生效**。`apply()` 之后用 `getPreEqBandByChannelIndex` + `EqBand.getGain()` 回读（容差 0.6 dB），反射拿不到时静默跳过，因此"verify"缺省不代表写入正确。
 6. **构建脚本硬编码版本号**。`build.sh` 的产物名与 `app/build.gradle.kts` 的 `versionCode`/`versionName` 要手改三处，1.2.1 已同步，但仍是隐患。
 7. **签名口令明文**在 `app/build.gradle.kts`（`out/aurora-observer.jks` 亦在同处）。自用无妨，仓库若转公开值得改成从 `local.properties` 读。
 8. **`spike/` 可清理**。早期 Gradle 试验缓存，已被忽略，删掉不影响构建。

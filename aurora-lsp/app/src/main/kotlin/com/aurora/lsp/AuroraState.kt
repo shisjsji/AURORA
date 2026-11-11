@@ -70,6 +70,10 @@ class AuroraState(private val context: Context) {
     var loudnessDb by mutableStateOf(0f)
         private set
 
+    /** Ten pre-EQ bands on a 20 ms frame instead of six on 10 ms; costs about 10 ms of latency. */
+    var precise by mutableStateOf(false)
+        private set
+
     /** Gains the engine actually wrote, as reported back through aurora_backend_bands. */
     var actualBands by mutableStateOf<FloatArray?>(null)
         private set
@@ -116,6 +120,7 @@ class AuroraState(private val context: Context) {
         val appMapRaw: String?,
         val spreadRaw: String?,
         val loudnessRaw: String?,
+        val preciseRaw: String?,
         val bandHzRaw: String?,
         val adaptRaw: String?,
         val packRaw: String?,
@@ -152,6 +157,7 @@ class AuroraState(private val context: Context) {
             appMapRaw = read(AuroraEngine.K_APP_MAP),
             spreadRaw = read(AuroraEngine.K_SPREAD),
             loudnessRaw = read(AuroraEngine.K_LOUDNESS),
+            preciseRaw = read(AuroraEngine.K_PRECISE),
             bandHzRaw = read(AuroraEngine.R_BANDHZ),
             adaptRaw = read(AuroraEngine.R_ADAPT),
             packRaw = read(AuroraEngine.K_PACK),
@@ -192,6 +198,7 @@ class AuroraState(private val context: Context) {
         appMap = parseAppMap(raw.appMapRaw)
         spread = (raw.spreadRaw?.toIntOrNull() ?: 0) / 10f
         loudnessDb = ((raw.loudnessRaw?.toIntOrNull() ?: 0) / 100f)
+        precise = raw.preciseRaw?.toIntOrNull() == 1
         engineBandHz = parseHz(raw.bandHzRaw)
         adapt = raw.adaptRaw.orEmpty().let { if (it == "null") "" else it }
         packName = raw.packRaw
@@ -257,38 +264,42 @@ class AuroraState(private val context: Context) {
             else Presets.curve(Presets.indexOf(safePreset)).copyOf()
         val isCustom = newCurve != null || safePreset == "custom"
 
-        val command = buildString {
-            append("settings put global ").append(AuroraEngine.K_ENABLED).append(' ')
-            append(if (newEnabled) 1 else 0)
-            append(" && settings put global ").append(AuroraEngine.K_PRESET).append(' ')
-            append(if (isCustom) "flat" else safePreset)
-            append(" && settings put global ").append(AuroraEngine.K_STRENGTH).append(' ')
-            append(newStrength)
-            if (isCustom) {
-                val encoded = targetCurve.joinToString(",") { (it * 10).toInt().toString() }
-                append(" && settings put global ").append(AuroraEngine.K_GEQ).append(' ').append(encoded)
-                // Keep a copy in the saved slot, so switching presets later cannot lose it. Only a
-                // hand-edited curve reaches this branch; restoring a preset writes no custom curve
-                // at all, so the saved slot is never replaced by one.
-                append(" && settings put global ")
-                    .append(AuroraEngine.K_GEQ_SAVED).append(' ').append(encoded)
-            } else {
-                append(" && settings delete global ").append(AuroraEngine.K_GEQ)
-            }
-            append(" && echo AURORA_OK")
+        val steps = ArrayList<Pair<String, String>>()
+        steps += "preset" to "settings put global " + AuroraEngine.K_PRESET + " " +
+                (if (isCustom) "flat" else safePreset)
+        steps += "strength" to "settings put global " + AuroraEngine.K_STRENGTH + " " + newStrength
+        if (isCustom) {
+            val encoded = targetCurve.joinToString(",") { (it * 10).toInt().toString() }
+            steps += "curve" to
+                    "settings put global " + AuroraEngine.K_GEQ + " " + encoded
+            // Keep a copy in the saved slot, so switching presets later cannot lose it. Only a
+            // hand-edited curve reaches this branch; restoring a preset writes no custom curve at
+            // all, so the saved slot is never replaced by one.
+            steps += "saved" to
+                    "settings put global " + AuroraEngine.K_GEQ_SAVED + " " + encoded
+        } else {
+            steps += "curve" to "settings delete global " + AuroraEngine.K_GEQ
         }
+        // The switch goes last. A shell that dies mid-batch then leaves the module either off or
+        // on with a whole curve - not on, pointed at a preset, with last week's gains underneath.
+        steps += "enabled" to
+                "settings put global " + AuroraEngine.K_ENABLED + " " + (if (newEnabled) 1 else 0)
 
-        val output = if (command == lastCommand) {
+        val command = steps.joinToString("\n") { it.second }
+        if (command == lastCommand) {
             // Same command, same effect. A double tap no longer forks su twice.
             saving = false
             return
-        } else {
-            withContext(Dispatchers.IO) { runRoot(command) }
         }
+        val failed = withContext(Dispatchers.IO) { writeSteps(steps) }
         saving = false
-        if (!output.contains("AURORA_OK")) {
-            AuroraLog.append(context, "save", "failed: " + output.take(200))
-            error = "保存失败。请确认已给 AURORA 授予 Root 权限后重试。当前设置没有丢失。"
+        if (failed != null) {
+            AuroraLog.append(context, "save", "failed at " + failed)
+            error = if (failed == "su") {
+                "保存失败。请确认已给 AURORA 授予 Root 权限后重试。当前设置没有丢失。"
+            } else {
+                "保存失败（$failed 这一步）。当前设置没有丢失。"
+            }
             return
         }
         lastCommand = command
@@ -306,10 +317,11 @@ class AuroraState(private val context: Context) {
         update(newCurve = saved)
     }
 
-    /** Writes the two advanced DSP parameters through su. */
+    /** Writes the advanced DSP parameters through su. */
     suspend fun updateAdvanced(
         spread: Float = this.spread,
-        loudnessDb: Float = this.loudnessDb
+        loudnessDb: Float = this.loudnessDb,
+        precise: Boolean = this.precise
     ) {
         saving = true
         error = null
@@ -318,6 +330,8 @@ class AuroraState(private val context: Context) {
             append((spread * 10).toInt())
             append(" && settings put global ").append(AuroraEngine.K_LOUDNESS).append(' ')
             append((loudnessDb * 100).toInt())
+            append(" && settings put global ").append(AuroraEngine.K_PRECISE).append(' ')
+            append(if (precise) 1 else 0)
             append(" && echo AURORA_OK")
         }
         val output = withContext(Dispatchers.IO) { runRoot(cmd) }
@@ -329,6 +343,7 @@ class AuroraState(private val context: Context) {
         lastCommand = cmd
         this.spread = spread
         this.loudnessDb = loudnessDb
+        this.precise = precise
         refresh()
     }
 
@@ -447,6 +462,30 @@ class AuroraState(private val context: Context) {
 
     /** Last shell command that succeeded, so tapping the same thing twice forks su once. */
     private var lastCommand: String = ""
+
+    /**
+     * Runs the settings writes one after another in a single su shell and names the step that blew
+     * up. Returns null when every step landed, "su" when the shell never ran at all (root missing or
+     * denied), or the step name otherwise - the caller shows that name, so a half applied batch is
+     * something the user can report instead of a generic failure.
+     */
+    private fun writeSteps(steps: List<Pair<String, String>>): String? {
+        val script = buildString {
+            steps.forEach { (name, command) ->
+                append(command)
+                append(" || { echo 'AURORA_FAIL ")
+                append(name)
+                append("'; exit 1; }\n")
+            }
+            append("echo AURORA_OK\n")
+        }
+        val output = runRoot(script)
+        if (output.contains("AURORA_OK")) return null
+        Regex("AURORA_FAIL (\\w+)").find(output)?.let { return it.groupValues[1] }
+        // No step spoke up, so the shell itself probably never started. Ask once, cheaply, before
+        // blaming root - otherwise a timeout on a slow su would be reported as missing permission.
+        return if (runRoot("echo AURORA_OK").contains("AURORA_OK")) "unknown" else "su"
+    }
 
     private fun runRoot(command: String): String {
         val output = StringBuilder()

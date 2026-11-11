@@ -440,6 +440,25 @@ fun DevicePanel(
             }
         }
 
+        if (profile.stages.isNotBlank() || profile.backendState.isNotBlank()) {
+            PanelLabel("处理链", dark)
+            PanelCard(dark) {
+                KeyValueRow("后端状态", profile.backendState.ifBlank { "—" }, dark)
+                // "bands=6/6 limiter=ok mbc=skip loudness=fail:..." - this is where a device whose
+                // limiter write silently failed stops hiding.
+                KeyValueRow("生效阶段", formatStages(profile.stages).ifBlank { "未上报" }, dark)
+                if (profile.backendMessage.isNotBlank()) {
+                    Text(
+                        profile.backendMessage,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        color = muted,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            }
+        }
+
         PanelLabel("记录", dark)
         PanelCard(dark) {
             KeyValueRow("检测时间", probedAt, dark)
@@ -450,6 +469,53 @@ fun DevicePanel(
             )
         }
     }
+}
+
+/**
+ * Turns the engine's stage string into one readable line.
+ *
+ * <p>The key names are what the engine and the feedback payload use, so they stay as they are in
+ * the raw string; this only renames them for the screen. An unknown key is passed through rather
+ * than dropped - a stage added in a later build should still show up on an older UI.
+ */
+internal fun formatStages(raw: String): String {
+    if (raw.isBlank()) return ""
+    return raw.trim().split(' ').mapNotNull { part ->
+        val cut = part.indexOf('=')
+        if (cut <= 0) return@mapNotNull part.takeIf { it.isNotBlank() }
+        val name = when (part.substring(0, cut)) {
+            "bands" -> "频段"
+            "limiter" -> "限幅器"
+            "mbc" -> "低频压缩"
+            "loudness" -> "响度"
+            "verify" -> "回读"
+            "short" -> "段数不足"
+            "arch" -> "架构"
+            "config" -> "高级配置"
+            else -> part.substring(0, cut)
+        }
+        val value = part.substring(cut + 1)
+        val shown = when {
+            value == "ok" -> "正常"
+            value == "skip" -> "跳过"
+            value == "stock" -> "平台默认"
+            value == "no_builder" -> "平台不支持"
+            value.startsWith("kept:") -> "设备只给 " + value.removePrefix("kept:") + " 段"
+            value.startsWith("fallback:") -> "退回默认（" + value.removePrefix("fallback:") + "）"
+            value.matches(Regex("\\d+x\\d+ms")) -> {
+                val (bands, ms) = value.split('x')
+                bands + " 段 / " + ms.removeSuffix("ms") + " ms"
+            }
+            value.startsWith("fail:") -> "失败（" + value.removePrefix("fail:") + "）"
+            value.startsWith("mismatch:") -> "不一致（" + value.removePrefix("mismatch:") + "）"
+            else -> value
+        }
+        if (part.startsWith("bands=") || part.startsWith("short=") || part.startsWith("arch=")) {
+            "$name $shown"
+        } else {
+            "$name：$shown"
+        }
+    }.joinToString("　")
 }
 
 private fun splitItems(raw: String): List<String> =

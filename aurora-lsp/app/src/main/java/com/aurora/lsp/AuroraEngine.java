@@ -39,6 +39,14 @@ public final class AuroraEngine {
     /** Advanced settings: spread (stereo widening) and perceived loudness. */
     public static final String K_SPREAD = "aurora_spread";
     public static final String K_LOUDNESS = "aurora_loudness";
+    /**
+     * Precise mode: ten pre-EQ bands at a 20 ms frame instead of six at 10 ms.
+     *
+     * <p>Costs about 10 ms of extra latency, so it is off by default and stays opt-in: lip sync in
+     * video and the feel of a game both notice, and neither is worth a slightly better bass
+     * contour unless the listener asked for it.
+     */
+    public static final String K_PRECISE = "aurora_precise";
     /** Per-device adaptation written by the app after fetching the matching device pack. */
     public static final String K_PACK = "aurora_device_pack";
 
@@ -54,10 +62,20 @@ public final class AuroraEngine {
     public static final String R_BANDHZ = "aurora_backend_bandhz";
     /** "pack:<name>", "fallback", or both, when the device runs adapted settings. */
     public static final String R_ADAPT = "aurora_backend_adapt";
+    /**
+     * Which stages the effect chain really has: "bands=6/6 limiter=ok mbc=ok loudness=ok".
+     *
+     * <p>These writes are all reflective and every one of them used to fail silently, so a phone
+     * running a half-configured chain looked identical to a working one. This is the key that
+     * tells them apart, and the one a device pack can be written against.
+     */
+    public static final String R_STAGES = "aurora_backend_stages";
 
     private static final int MAX_SESSIONS = 8;
     private static final int LOG_LINES = 50;
     private static final long PLAYBACK_DEBOUNCE_MS = 60L;
+    /** How long a session may go unseen before its effect is released. */
+    private static final long STALE_TTL_MS = 10_000L;
 
     /** Loudness compensation shape per band, scaled by how far the volume sits below 60%. */
     private static final float[] LOUDNESS_SHAPE = {1.0f, 0.5f, 0f, -0.1f, 0.3f, 0.6f};
@@ -68,6 +86,8 @@ public final class AuroraEngine {
      * muddy range makes everything sound thick. 500 Hz has headroom but is rarely needed.
      */
     private static final float[] MAX_BOOST_BY_BAND = {8f, 4f, 6f, 8f, 8f, 8f};
+    /** Same ceilings on a route with its own bass: only 200 Hz differs, 4 dB becomes 6 dB. */
+    private static final float[] HEADPHONE_BOOST_BY_BAND = {8f, 6f, 6f, 8f, 8f, 8f};
 
     /**
      * Pre-1.3.1 the limiter constructor lookup never matched, so the engine ran the AOSP default
@@ -183,6 +203,7 @@ public final class AuroraEngine {
         boolean testing = selftestActive();
         int applied = 0;
         String failure = "";
+        String stages = "";
         float[] lastGains = null;
         boolean fellBackThisTick = false;
 
@@ -195,39 +216,75 @@ public final class AuroraEngine {
             SessionInfo info = entry.getValue();
             lastSeen.put(session, now);
 
+            // The curve is authored on six bands and stays that way everywhere the user can see
+            // it; only what reaches the DSP is resampled, onto however many bands the chain was
+            // opened with. Six in, six out when precise mode is off, so nothing changes there.
             float[] gains = testing ? selftestGains() : buildGains(config, info, volume);
-            float[] spread = buildSpread(config);
             // The table is picked per session so a fallback triggered by an earlier session in
             // this same tick is already in force for the later ones.
             float[] table = fallbackEngaged ? FALLBACK_HZ : activeTable(config);
-            String desired = desiredSignature(gains, config, table);
+            float[] spread = buildSpread(config, info);
+            int bands = config.preEqBands();
+            float[] writeGains = AudioEq.expandGains(gains, table, bands);
+            float[] writeSpread = spread == null ? null : AudioEq.expandGains(spread, table, bands);
+            String desired = desiredSignature(writeGains, config, table, bands);
             lastGains = gains;
 
             AudioEq eq = effects.get(session);
+            if (eq != null && (!eq.isOpen()
+                    || !eq.matchesArchitecture(config.preEqBands(), config.frameMs()))) {
+                // Two ways an effect outlives its usefulness: the session dropped its chain (a
+                // track torn down without a playback callback leaves a handle whose writes all
+                // fail), or the band count changed - which cannot be altered on a live chain, so
+                // precision mode has to rebuild it rather than write into a six-band effect.
+                eq.close();
+                effects.remove(session);
+                eq = null;
+            }
             if (eq == null) {
                 if (effects.size() >= MAX_SESSIONS) {
                     skipped++;
                     continue;
                 }
                 eq = new AudioEq();
-                if (!eq.open(session, config.limiter)) {
-                    failure = eq.lastError();
+                // open() releases the effect itself on every failure path, so a session that
+                // cannot be controlled does not keep an unconfigured chain bound to it.
+                if (!eq.open(session, config.limiter, config.preEqBands(), config.frameMs())) {
+                    // A session that keeps refusing to open is retried on every tick and on every
+                    // playback callback. That is the right thing to do (the chain is rebuilt when
+                    // the track restarts), but it would also overwrite the reported reason 30
+                    // times a minute; the first failure is the informative one.
+                    if (failure.isEmpty()) {
+                        failure = eq.lastError();
+                        stages = eq.stages();
+                    }
                     continue;
                 }
                 effects.put(session, eq);
             }
+            // Only a working chain contributes to the reported stages. If one session failed to
+            // open, its stages are cleared by close(), and taking them from a healthy sibling
+            // would report the working one - the failure would look like a success.
+            if (failure.isEmpty()) stages = eq.stages();
             if (eq.isApplied() && desired.equals(eq.signature()) && !testing) {
                 applied++;
                 continue;
             }
-            if (!eq.apply(gains, spread, config.loudnessMb, true, table)) {
+            if (!eq.apply(writeGains, writeSpread, config.loudnessMb, true,
+                    AudioEq.expandTable(table, bands))) {
                 // The primary table was rejected: a device whose DSP does not accept the 80 Hz
                 // or 10 kHz endpoints still gets a curve, on the table that predates them.
                 if (!fallbackEngaged && !sameTable(table, FALLBACK_HZ)
-                        && eq.apply(gains, spread, config.loudnessMb, true, FALLBACK_HZ)) {
+                        && eq.apply(AudioEq.expandGains(gains, FALLBACK_HZ, bands),
+                                spread == null ? null
+                                        : AudioEq.expandGains(spread, FALLBACK_HZ, bands),
+                                config.loudnessMb, true,
+                                AudioEq.expandTable(FALLBACK_HZ, bands))) {
                     fallbackEngaged = true;
                     fellBackThisTick = true;
-                    eq.markApplied(desiredSignature(gains, config, FALLBACK_HZ));
+                    eq.markApplied(desiredSignature(
+                            AudioEq.expandGains(gains, FALLBACK_HZ, bands),
+                            config, FALLBACK_HZ, bands));
                     applied++;
                     continue;
                 }
@@ -240,7 +297,8 @@ public final class AuroraEngine {
 
         releaseStale(now);
         if (applied == 0 && !failure.isEmpty()) {
-            report("error", "写入失败：" + failure, lastGains, 0, tableFor(config), adaptString(config));
+            report("error", "写入失败：" + failure, lastGains, 0, tableFor(config),
+                    adaptString(config), stages);
             return;
         }
         String message = testing
@@ -248,10 +306,11 @@ public final class AuroraEngine {
                 : "已写入 " + applied + " 个播放会话。";
         if (fellBackThisTick) message += " 本机频点被拒，已回退 250 Hz–6.3 kHz 兼容频点。";
         if (config.packName != null) message += " 设备适配：" + config.packName + "。";
+        if (config.precise) message += " 精确模式：10 段 / 20 ms 帧。";
         if (!failure.isEmpty()) message += " 部分会话失败：" + failure;
         if (skipped > 0) message += " 会话数已达上限，跳过 " + skipped + " 个。";
         report(testing ? "selftest" : "active", message, lastGains, applied,
-                tableFor(config), adaptString(config));
+                tableFor(config), adaptString(config), stages);
     }
 
     private float[] activeTable(Config config) {
@@ -269,8 +328,16 @@ public final class AuroraEngine {
         return adapt;
     }
 
-    private static String desiredSignature(float[] gains, Config config, float[] table) {
-        return signature(gains) + "s" + config.spread + "l" + config.loudnessMb + "t" + tableTag(table);
+    /**
+     * The full identity of a write: curve, widening, loudness, band table and band count.
+     *
+     * <p>The band count has to be in here. Signature is what decides whether the next tick skips
+     * the write, and after leaving precise mode the six-band curve and the ten-band curve can
+     * round to the same values - skipping then leaves the old chain in place with the old shape.
+     */
+    private static String desiredSignature(float[] gains, Config config, float[] table, int bands) {
+        return signature(gains) + "s" + config.spread + "l" + config.loudnessMb
+                + "t" + tableTag(table) + "n" + bands;
     }
 
     private static String tableTag(float[] table) {
@@ -289,20 +356,40 @@ public final class AuroraEngine {
         return true;
     }
 
-    private static float[] buildSpread(Config config) {
+    /**
+     * Stereo widening shape, trimmed per route.
+     *
+     * <p>Unchanged on speakers: the two drivers are centimetres apart, so a wide inter-channel
+     * difference is most of what sells the effect. On headphones and earbuds the channels are
+     * already isolated and the same amount is roughly twice as strong, so it is scaled back
+     * rather than left to sound phasey.
+     */
+    static float[] buildSpread(Config config, SessionInfo info) {
         if (config.spread <= 0) return null;
         // Non-uniform: the ear localises high frequencies by inter-aural level difference, so
         // the top band gets the full amount, 4k gets most of it, 1.5k gets half. Bass stays
         // centred - separating it makes the low end thin, not wide.
-        return new float[]{0f, 0f, 0f, config.spread * 0.5f, config.spread * 0.8f, config.spread};
+        float amount = config.spread * routeSpreadScale(info);
+        return new float[]{0f, 0f, 0f, amount * 0.5f, amount * 0.8f, amount};
+    }
+
+    /** How much of the full widening a route tolerates. Isolated channels get less. */
+    private static float routeSpreadScale(SessionInfo info) {
+        int type = info == null ? -1 : info.deviceType;
+        switch (type) {
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+                return 0.6f;
+            default:
+                return 1f;
+        }
     }
 
     private void releaseStale(long now) {
-        List<Integer> gone = new ArrayList<>();
-        for (Map.Entry<Integer, Long> entry : lastSeen.entrySet()) {
-            if (now - entry.getValue() > 10_000L) gone.add(entry.getKey());
-        }
-        for (Integer session : gone) {
+        for (Integer session : staleSessions(lastSeen, now, STALE_TTL_MS)) {
             lastSeen.remove(session);
             AudioEq eq = effects.remove(session);
             if (eq != null) eq.close();
@@ -439,7 +526,7 @@ public final class AuroraEngine {
             out[i] = scaled[i] * fit;
         }
 
-        applyVolumeCompensation(out, volumePercent);
+        applyVolumeCompensation(out, volumePercent, info);
         applyRouteTrim(out, info);
 
         float loudest = -AudioEq.MAX_DB;
@@ -450,8 +537,7 @@ public final class AuroraEngine {
         }
 
         for (int i = 0; i < AudioEq.BANDS; i++) {
-            float[] caps = config.maxBoost != null ? config.maxBoost : MAX_BOOST_BY_BAND;
-            float cap = caps[Math.min(i, caps.length - 1)];
+            float cap = capForBand(config, info, i);
             out[i] = Math.max(-AudioEq.MAX_DB, Math.min(cap, out[i]));
         }
         return out;
@@ -470,12 +556,60 @@ public final class AuroraEngine {
         return Presets.curve(Presets.indexOf(config.preset));
     }
 
-    private static void applyVolumeCompensation(float[] gains, int volumePercent) {
+    /**
+     * Lifts the bass at low volume, less on routes that already deliver it.
+     *
+     * <p>The compensation exists to make up for a small speaker losing its bottom octave as the
+     * volume drops. A headphone or earbud does not lose it, and the same lift there reads as
+     * boomy rather than full, so it is scaled back instead of being shared blind.
+     */
+    private static void applyVolumeCompensation(float[] gains, int volumePercent, SessionInfo info) {
         if (volumePercent >= 60) return;
         float depth = (60 - volumePercent) / 60f;
-        float amount = MAX_LOUDNESS_BOOST_DB * depth;
+        float amount = MAX_LOUDNESS_BOOST_DB * depth * routeLoudnessScale(info);
         for (int i = 0; i < gains.length && i < LOUDNESS_SHAPE.length; i++) {
             gains[i] += amount * LOUDNESS_SHAPE[i];
+        }
+    }
+
+    /** Speaker-tuned lift, kept whole only where the driver is the reason for it. */
+    private static float routeLoudnessScale(SessionInfo info) {
+        int type = info == null ? -1 : info.deviceType;
+        switch (type) {
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+                return 0.6f;
+            default:
+                return 1f;
+        }
+    }
+
+    private static float capForBand(Config config, SessionInfo info, int index) {
+        float[] caps = config.maxBoost != null ? config.maxBoost : capsForRoute(info);
+        return caps[Math.min(index, caps.length - 1)];
+    }
+
+    /**
+     * Boost ceilings for the compiled-in table; a device pack still overrides them wholesale.
+     *
+     * <p>Only the 200 Hz value moves: 4 dB there keeps a phone speaker from turning thick, a
+     * limitation a headphone does not share. The rest are already at the preamp limit and could
+     * not bind even if they were raised.
+     */
+    private static float[] capsForRoute(SessionInfo info) {
+        int type = info == null ? -1 : info.deviceType;
+        switch (type) {
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+                return HEADPHONE_BOOST_BY_BAND;
+            default:
+                return MAX_BOOST_BY_BAND;
         }
     }
 
@@ -504,10 +638,20 @@ public final class AuroraEngine {
 
     private void report(String state, String message, float[] gains, int applied,
                         float[] table, String adapt) {
+        report(state, message, gains, applied, table, adapt, "");
+    }
+
+    private void report(String state, String message, float[] gains, int applied,
+                        float[] table, String adapt, String stages) {
         String bands = gains == null ? "" : join(gains);
         String sessions = join(effects.keySet());
         String bandHz = table == null ? "" : join(table);
-        String signature = state + '|' + message + '|' + bands + '|' + applied + '|' + sessions;
+        String chain = stages == null ? "" : stages;
+        // The stages belong in the signature: a limiter that starts or stops landing changes
+        // nothing else in this tuple, and skipping the write would hide it until the next state
+        // change - exactly the silence this key exists to break.
+        String signature = state + '|' + message + '|' + bands + '|' + applied + '|' + sessions
+                + '|' + chain;
         if (signature.equals(lastSignature)) return;
         lastSignature = signature;
         try {
@@ -519,6 +663,7 @@ public final class AuroraEngine {
             Settings.Global.putString(resolver, R_APPLIED, String.valueOf(applied));
             Settings.Global.putString(resolver, R_BANDHZ, bandHz);
             Settings.Global.putString(resolver, R_ADAPT, adapt == null ? "" : adapt);
+            Settings.Global.putString(resolver, R_STAGES, chain);
             Settings.Global.putLong(resolver, R_UPDATED, System.currentTimeMillis());
             record(resolver, state, message);
         } catch (Throwable error) {
@@ -528,7 +673,7 @@ public final class AuroraEngine {
     }
 
     private void report(String state, String message, float[] gains, int applied) {
-        report(state, message, gains, applied, null, "");
+        report(state, message, gains, applied, null, "", "");
     }
 
     private void record(ContentResolver resolver, String state, String message) {
@@ -573,6 +718,7 @@ public final class AuroraEngine {
             config.appMap = parseAppMap(Settings.Global.getString(resolver, K_APP_MAP));
             config.spread = clamp(Settings.Global.getInt(resolver, K_SPREAD, 0), 0, 80) / 10f;
             config.loudnessMb = clamp(Settings.Global.getInt(resolver, K_LOUDNESS, 0), 0, 500);
+            config.precise = Settings.Global.getInt(resolver, K_PRECISE, 0) == 1;
             parsePack(config, Settings.Global.getString(resolver, K_PACK));
             // An unknown key still resolves to the flat curve - that is the safe value - but it
             // used to do so silently, which looks exactly like "the module does nothing". Say it
@@ -680,47 +826,20 @@ public final class AuroraEngine {
         AudioEq.LimiterConfig limiter = null;
         try {
             JSONObject object = new JSONObject(raw);
-            name = object.optString("name");
+            String rawName = object.optString("name");
+            name = rawName == null || rawName.isEmpty() ? null : rawName;
+            // The JSON is unwrapped here and validated by the static helpers below, which take plain
+            // numbers: that keeps the rules testable on a plain JVM, where org.json only exists as a
+            // stub that throws.
             JSONArray bands = object.optJSONArray("bandHz");
-            if (bands != null && bands.length() == AudioEq.BANDS) {
-                float[] values = new float[AudioEq.BANDS];
-                boolean ok = true;
-                for (int i = 0; i < AudioEq.BANDS; i++) {
-                    values[i] = (float) bands.optDouble(i, 0);
-                    if (values[i] <= 20f || values[i] >= 20000f
-                            || (i > 0 && values[i] <= values[i - 1])) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) bandHz = values;
-            }
+            if (bands != null) bandHz = bandHzFromPack(toDoubles(bands));
             JSONArray boosts = object.optJSONArray("maxBoost");
-            if (boosts != null && boosts.length() == AudioEq.BANDS) {
-                float[] values = new float[AudioEq.BANDS];
-                boolean ok = true;
-                for (int i = 0; i < AudioEq.BANDS; i++) {
-                    values[i] = (float) boosts.optDouble(i, 0);
-                    if (values[i] < 0f || values[i] > AudioEq.MAX_DB) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) maxBoost = values;
-            }
-            double threshold = object.optDouble("thresholdDb", Double.NaN);
-            double ratio = object.optDouble("ratio", Double.NaN);
-            double attack = object.optDouble("attackMs", Double.NaN);
-            double release = object.optDouble("releaseMs", Double.NaN);
-            if (!Double.isNaN(threshold) && !Double.isNaN(ratio) && !Double.isNaN(attack)
-                    && !Double.isNaN(release)
-                    && threshold >= -24f && threshold <= 0f
-                    && ratio >= 1f && ratio <= 20f
-                    && attack >= 1f && attack <= 100f
-                    && release >= 20f && release <= 500f) {
-                limiter = new AudioEq.LimiterConfig(
-                        (float) threshold, (float) ratio, (float) attack, (float) release);
-            }
+            if (boosts != null) maxBoost = maxBoostFromPack(toDoubles(boosts));
+            limiter = limiterFromPack(
+                    object.optDouble("thresholdDb", Double.NaN),
+                    object.optDouble("ratio", Double.NaN),
+                    object.optDouble("attackMs", Double.NaN),
+                    object.optDouble("releaseMs", Double.NaN));
         } catch (Throwable error) {
             Log.w(TAG, "device pack unreadable: " + AudioEq.describe(error));
             return;
@@ -729,11 +848,72 @@ public final class AuroraEngine {
         packBandHz = bandHz;
         packMaxBoost = maxBoost;
         packLimiter = limiter;
-        packName = name == null || name.isEmpty() ? null : name;
+        packName = name;
         config.bandHz = packBandHz;
         config.maxBoost = packMaxBoost;
         config.limiter = packLimiter != null ? packLimiter : DEFAULT_LIMITER;
         config.packName = packName;
+    }
+
+    private static double[] toDoubles(JSONArray array) {
+        double[] values = new double[array.length()];
+        for (int i = 0; i < values.length; i++) values[i] = array.optDouble(i, 0);
+        return values;
+    }
+
+    /**
+     * Band table from a device pack, or null when the pack's numbers cannot be trusted: six bands,
+     * every one inside the audible window, strictly ascending. A pack that fails any of those is
+     * dropped whole, because a half applied table would move the filters onto the wrong notes.
+     */
+    static float[] bandHzFromPack(double[] values) {
+        if (values == null || values.length != AudioEq.BANDS) return null;
+        float[] out = new float[AudioEq.BANDS];
+        for (int i = 0; i < AudioEq.BANDS; i++) {
+            out[i] = (float) values[i];
+            if (out[i] <= 20f || out[i] >= 20000f) return null;
+            if (i > 0 && out[i] <= out[i - 1]) return null;
+        }
+        return out;
+    }
+
+    /** Per-band boost ceilings from a pack: six values, each between 0 and +12 dB. */
+    static float[] maxBoostFromPack(double[] values) {
+        if (values == null || values.length != AudioEq.BANDS) return null;
+        float[] out = new float[AudioEq.BANDS];
+        for (int i = 0; i < AudioEq.BANDS; i++) {
+            out[i] = (float) values[i];
+            if (out[i] < 0f || out[i] > AudioEq.MAX_DB) return null;
+        }
+        return out;
+    }
+
+    /**
+     * Limiter settings from a pack. All four must be present and inside the window the audio chain
+     * can actually honour; a ratio below 1 or an attack of zero would turn the limiter off or make
+     * it chatter, so a pack that asks for one is ignored rather than clamped.
+     */
+    static AudioEq.LimiterConfig limiterFromPack(double threshold, double ratio, double attack,
+                                                 double release) {
+        if (Double.isNaN(threshold) || Double.isNaN(ratio) || Double.isNaN(attack)
+                || Double.isNaN(release)) {
+            return null;
+        }
+        if (threshold < -24f || threshold > 0f) return null;
+        if (ratio < 1f || ratio > 20f) return null;
+        if (attack < 1f || attack > 100f) return null;
+        if (release < 20f || release > 500f) return null;
+        return new AudioEq.LimiterConfig(
+                (float) threshold, (float) ratio, (float) attack, (float) release);
+    }
+
+    /** Sessions nobody has touched for longer than the TTL, oldest first. */
+    static List<Integer> staleSessions(Map<Integer, Long> lastSeen, long now, long ttlMs) {
+        List<Integer> gone = new ArrayList<>();
+        for (Map.Entry<Integer, Long> entry : lastSeen.entrySet()) {
+            if (now - entry.getValue() > ttlMs) gone.add(entry.getKey());
+        }
+        return gone;
     }
 
     static final class Config {
@@ -753,6 +933,20 @@ public final class AuroraEngine {
         float[] maxBoost;
         AudioEq.LimiterConfig limiter = DEFAULT_LIMITER;
         String packName;
+        /**
+         * Precise mode: open the chain with ten bands at a 20 ms frame instead of the platform's
+         * six at 10 ms. Read from settings every tick, so the engine can notice a change and
+         * rebuild the effect - a band count cannot be altered on a live chain.
+         */
+        boolean precise;
+
+        int preEqBands() {
+            return precise ? AudioEq.PRECISE_BANDS : AudioEq.DEFAULT_BANDS;
+        }
+
+        float frameMs() {
+            return precise ? AudioEq.PRECISE_FRAME_MS : 0f;
+        }
     }
 
     static final class SessionInfo {

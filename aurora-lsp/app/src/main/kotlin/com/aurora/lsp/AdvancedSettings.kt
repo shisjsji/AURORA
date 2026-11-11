@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import java.util.Locale
@@ -58,6 +59,42 @@ internal fun AdvancedSettingsPanel(
             onChange = { loudness.value = it },
             onCommit = { scope.launch { state.updateAdvanced(loudnessDb = loudness.value) } }
         )
+        RowDivider()
+        SwitchRow(
+            title = "精确模式",
+            summary = "十段均衡，频点分得更细，低频不再挤成一段。代价是声音比画面晚约 10 毫秒，看视频和打游戏时建议关掉。",
+            checked = state.precise,
+            onChange = { scope.launch { state.updateAdvanced(precise = it) } }
+        )
+    }
+}
+
+/** A row that flips a boolean the engine reads, styled like the sliders above it. */
+@Composable
+private fun SwitchRow(
+    title: String,
+    summary: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit
+) {
+    val colors = MiuixTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Space.card, vertical = Space.rowV),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 15.sp, color = colors.onSurface)
+            Text(
+                summary,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                color = colors.onSurfaceVariantSummary
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 

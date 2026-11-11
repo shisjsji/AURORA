@@ -28,7 +28,9 @@ data class DeviceProfile(
      */
     val backendState: String = "",
     val backendMessage: String = "",
-    val bandHz: String = ""
+    val bandHz: String = "",
+    /** Which stages the effect chain really got: "bands=6/6 limiter=ok mbc=skip". */
+    val stages: String = ""
 ) {
     /** Probe never wrote anything: the module is not running at all. */
     val probed: Boolean get() = probedAt > 0L
@@ -71,7 +73,8 @@ data class DeviceProfile(
             AuroraEngine.R_ENGINE_VERSION,
             AuroraEngine.R_STATE,
             AuroraEngine.R_MESSAGE,
-            AuroraEngine.R_BANDHZ
+            AuroraEngine.R_BANDHZ,
+            AuroraEngine.R_STAGES
         )
 
         /** Reads off the main thread: ten Settings.Global lookups are ten binder round trips. */
@@ -99,7 +102,8 @@ data class DeviceProfile(
                 engineVersion = values[10].toIntOrNull() ?: -1,
                 backendState = values[11],
                 backendMessage = values[12],
-                bandHz = values[13]
+                bandHz = values[13],
+                stages = values[14]
             )
         }
     }

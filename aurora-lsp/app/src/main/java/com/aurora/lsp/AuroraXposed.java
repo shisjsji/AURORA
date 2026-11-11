@@ -143,7 +143,11 @@ public final class AuroraXposed implements IXposedHookLoadPackage {
             String[] keys = {
                     AuroraEngine.K_ENABLED, AuroraEngine.K_PANIC, AuroraEngine.K_PRESET,
                     AuroraEngine.K_STRENGTH, AuroraEngine.K_GEQ, AuroraEngine.K_SELFTEST,
-                    AuroraEngine.K_USER_PRESETS, AuroraEngine.K_APP_MAP, AuroraEngine.K_PACK
+                    AuroraEngine.K_USER_PRESETS, AuroraEngine.K_APP_MAP,
+                    // Saved-but-unwatched: moving the spread or loudness slider used to wait for
+                    // the next 2 s tick, so the change landed audibly late.
+                    AuroraEngine.K_SPREAD, AuroraEngine.K_LOUDNESS, AuroraEngine.K_GEQ_SAVED,
+                    AuroraEngine.K_PACK
             };
             for (String key : keys) {
                 resolver.registerContentObserver(Settings.Global.getUriFor(key), false, observer);
