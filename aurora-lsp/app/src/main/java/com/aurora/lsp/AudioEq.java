@@ -346,6 +346,28 @@ public final class AudioEq {
         }
     }
 
+    /** True when the given shape is already what this effect's limiter runs. */
+    public synchronized boolean limiterMatches(LimiterConfig cfg) {
+        return cfg != null
+                && cfg.thresholdDb == limiterThreshold
+                && cfg.ratio == limiterRatio
+                && cfg.attackMs == limiterAttackMs
+                && cfg.releaseMs == limiterReleaseMs;
+    }
+
+    /**
+     * Re-writes the limiter without touching the curve. Used when a session moves between the
+     * normal and the spatializer route: the bands stay, only the ceiling moves.
+     */
+    public synchronized void applyLimiter(LimiterConfig cfg) {
+        if (cfg == null) return;
+        limiterThreshold = cfg.thresholdDb;
+        limiterRatio = cfg.ratio;
+        limiterAttackMs = cfg.attackMs;
+        limiterReleaseMs = cfg.releaseMs;
+        enableLimiter();
+    }
+
     private void enableBaseCompression() {
         if (effect == null || mbcBandCtor == null || setMbcBandAll == null) return;
         try {

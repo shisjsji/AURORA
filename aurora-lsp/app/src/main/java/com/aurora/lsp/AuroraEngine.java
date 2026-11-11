@@ -83,6 +83,14 @@ public final class AuroraEngine {
      */
     static final float[] FALLBACK_HZ = {250f, 500f, 1000f, 2000f, 4000f, 6300f};
 
+    /**
+     * Extra limiter headroom for sessions routed through the spatializer thread. The renderer's
+     * makeup gain sits downstream of our limiter, so a session the system marks isSpatialized
+     * gets a deeper threshold to keep the rendered output under the DAC ceiling. Covers a makeup
+     * gain of up to +8 dB before clipping.
+     */
+    static final float SPATIAL_HEADROOM_DB = 4f;
+
     private static volatile AuroraEngine instance;
 
     private final Context context;
@@ -99,6 +107,7 @@ public final class AuroraEngine {
     private Method getPlayerState;
     private Method getClientUid;
     private Method getAudioDeviceInfo;
+    private Method getIsSpatialized;
     private boolean reflected;
     private String lastError = "";
     private String lastSignature = "";
@@ -182,6 +191,7 @@ public final class AuroraEngine {
 
         boolean testing = selftestActive();
         int applied = 0;
+        int spatialApplied = 0;
         String failure = "";
         float[] lastGains = null;
         boolean fellBackThisTick = false;
@@ -202,6 +212,7 @@ public final class AuroraEngine {
             float[] table = fallbackEngaged ? FALLBACK_HZ : activeTable(config);
             String desired = desiredSignature(gains, config, table);
             lastGains = gains;
+            AudioEq.LimiterConfig limiter = limiterFor(config, info.spatialized);
 
             AudioEq eq = effects.get(session);
             if (eq == null) {
@@ -210,14 +221,19 @@ public final class AuroraEngine {
                     continue;
                 }
                 eq = new AudioEq();
-                if (!eq.open(session, config.limiter)) {
+                if (!eq.open(session, limiter)) {
                     failure = eq.lastError();
                     continue;
                 }
                 effects.put(session, eq);
+            } else if (!eq.limiterMatches(limiter)) {
+                // The session moved between the normal and the spatializer route: the curve stays,
+                // only the limiter ceiling moves.
+                eq.applyLimiter(limiter);
             }
             if (eq.isApplied() && desired.equals(eq.signature()) && !testing) {
                 applied++;
+                if (info.spatialized) spatialApplied++;
                 continue;
             }
             if (!eq.apply(gains, spread, config.loudnessMb, true, table)) {
@@ -229,6 +245,7 @@ public final class AuroraEngine {
                     fellBackThisTick = true;
                     eq.markApplied(desiredSignature(gains, config, FALLBACK_HZ));
                     applied++;
+                    if (info.spatialized) spatialApplied++;
                     continue;
                 }
                 failure = eq.lastError();
@@ -236,6 +253,7 @@ public final class AuroraEngine {
             }
             eq.markApplied(desired);
             applied++;
+            if (info.spatialized) spatialApplied++;
         }
 
         releaseStale(now);
@@ -248,10 +266,26 @@ public final class AuroraEngine {
                 : "已写入 " + applied + " 个播放会话。";
         if (fellBackThisTick) message += " 本机频点被拒，已回退 250 Hz–6.3 kHz 兼容频点。";
         if (config.packName != null) message += " 设备适配：" + config.packName + "。";
+        if (spatialApplied > 0) {
+            message += " 沉浸声路径：限幅器已加严 " + Math.round(SPATIAL_HEADROOM_DB) + " dB 防空间渲染削顶。";
+        }
         if (!failure.isEmpty()) message += " 部分会话失败：" + failure;
         if (skipped > 0) message += " 会话数已达上限，跳过 " + skipped + " 个。";
         report(testing ? "selftest" : "active", message, lastGains, applied,
                 tableFor(config), adaptString(config));
+    }
+
+    /**
+     * The limiter actually in force for one session: the pack's (or default) shape, deepened when
+     * that session is being spatialized, because the renderer's makeup gain comes after us.
+     */
+    private static AudioEq.LimiterConfig limiterFor(Config config, boolean spatialized) {
+        if (!spatialized || config.limiter == null) return config.limiter;
+        return new AudioEq.LimiterConfig(
+                Math.max(-24f, config.limiter.thresholdDb - SPATIAL_HEADROOM_DB),
+                config.limiter.ratio,
+                config.limiter.attackMs,
+                config.limiter.releaseMs);
     }
 
     private float[] activeTable(Config config) {
@@ -328,7 +362,8 @@ public final class AuroraEngine {
                 if (session <= 0 || session > 1_000_000) continue;
                 if (state != 2) continue;
                 int uid = uidOf(config);
-                result.put(session, new SessionInfo(session, uid, deviceTypeOf(config), packageOf(uid)));
+                result.put(session, new SessionInfo(session, uid, deviceTypeOf(config),
+                        packageOf(uid), spatializedOf(config)));
             }
         } catch (Throwable error) {
             lastError = AudioEq.describe(error);
@@ -359,6 +394,23 @@ public final class AuroraEngine {
         return -1;
     }
 
+    /**
+     * Whether this session is being rendered by the spatializer output thread.
+     *
+     * <p>That thread's chain has exactly one effect - the HRTF renderer - and applies its own
+     * makeup gain downstream of our limiter, so the only way to keep the renderer's output out of
+     * the DAC's ceiling is to leave it extra headroom on the way in.
+     */
+    private boolean spatializedOf(Object config) {
+        if (getIsSpatialized == null) return false;
+        try {
+            Object value = getIsSpatialized.invoke(config);
+            return Boolean.TRUE.equals(value);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private String packageOf(int uid) {
         if (uid <= 0) return null;
         if (uidPackages.containsKey(uid)) return uidPackages.get(uid);
@@ -383,6 +435,7 @@ public final class AuroraEngine {
             getPlayerState = configClass.getMethod("getPlayerState");
             try { getClientUid = configClass.getMethod("getClientUid"); } catch (Throwable ignored) {}
             try { getAudioDeviceInfo = configClass.getMethod("getAudioDeviceInfo"); } catch (Throwable ignored) {}
+            try { getIsSpatialized = configClass.getMethod("isSpatialized"); } catch (Throwable ignored) {}
             return true;
         } catch (Throwable error) {
             lastError = AudioEq.describe(error);
@@ -760,12 +813,19 @@ public final class AuroraEngine {
         final int uid;
         final int deviceType;
         final String packageName;
+        /** True when the system routes this session through the spatializer output thread. */
+        final boolean spatialized;
 
         SessionInfo(int session, int uid, int deviceType, String packageName) {
+            this(session, uid, deviceType, packageName, false);
+        }
+
+        SessionInfo(int session, int uid, int deviceType, String packageName, boolean spatialized) {
             this.session = session;
             this.uid = uid;
             this.deviceType = deviceType;
             this.packageName = packageName;
+            this.spatialized = spatialized;
         }
     }
 }

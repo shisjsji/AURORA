@@ -1,8 +1,9 @@
 # 音频模块（AURORA）· CONTEXT
 
-一句话摘要：这是一个用 LSPosed 注入 system_server、按**正在播放的音频会话**逐个挂载 DynamicsProcessing 软件均衡器、在音轨末端叠加六段曲线（80/200/500/1.5k/4k/10k Hz）的 Android 调音模块；当前版本 **1.3.1**（versionCode 1301），仓库 shisjsji/AURORA。
+一句话摘要：这是一个用 LSPosed 注入 system_server、按**正在播放的音频会话**逐个挂载 DynamicsProcessing 软件均衡器、在音轨末端叠加六段曲线（80/200/500/1.5k/4k/10k Hz）的 Android 调音模块；当前版本 **1.3.2**（versionCode 1302），仓库 shisjsji/AURORA。
 
 > **本文件已于 2026-11-06 按 1.2.0 重写。** 旧版描述的「Dolby DAX3 `dap_hw` + 20 段 GEQ + AudioEffect 厂商参数通道」路线**已整体废弃**，对应代码 `DolbyDap.java` 已删除。若在别处读到 v1.5.0、20 段、`aurora_geq` 之外还带 profile 的说法，一律以本文件为准。
+> **1.3.2 变更**：修复沉浸声（空间音频）路径杂音——取证确认该路径输出线程仅有 miSpatializer 一个 HRTF 渲染器（MiSound/Dolby 保护链整条不在），渲染器补偿增益在限幅器下游导致 DAC 削顶；引擎现逐会话读取 isSpatialized，空间化会话限幅器阈值下探 4 dB（SPATIAL_HEADROOM_DB），路由切换时限幅器热更新不重建效果器。
 > **1.3.1 变更**：修复 Limiter 反射构造器签名错误——此前限幅器从未生效，所有设备实际跑的是 AOSP 默认的 −2 dBFS/10:1 砖墙，是破音/炸音的主要来源；新增设备适配包机制（服务器 devices.json → App 匹配写入 aurora_device_pack → 引擎逐 tick 消费，频点被拒自动回退 250–6.3 kHz）；设备档案回报 backend 写入状态。
 > **1.3.0 变更**：界面按 DESIGN.md 整体重做（token 体系、miuix 分组与原生滑杆、液态玻璃只留在 Dock），新增声场宽度与感知响度两个参数、滑杆「恢复默认」、小屏紧凑模式；旧 Magisk 路线与 20 段 GEQ 描述均为历史。本文件里凡写「250–6300 Hz」的段落，频点以代码 AudioEq.BAND_HZ 为准。
 
