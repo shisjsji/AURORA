@@ -119,6 +119,8 @@ public final class AuroraEngine {
     private boolean fallbackEngaged;
     /** Cached parse of aurora_device_pack: JSON is only walked when the raw string changes. */
     private String lastPackRaw = "";
+    /** A raw string that failed to parse, so it is not re-parsed every tick. */
+    private String lastPackBad = "";
     private float[] packBandHz;
     private float[] packMaxBoost;
     private AudioEq.LimiterConfig packLimiter;
@@ -278,8 +280,10 @@ public final class AuroraEngine {
     /**
      * The limiter actually in force for one session: the pack's (or default) shape, deepened when
      * that session is being spatialized, because the renderer's makeup gain comes after us.
+     *
+     * <p>Package-private so the clamp rule itself has a test on a plain JVM.
      */
-    private static AudioEq.LimiterConfig limiterFor(Config config, boolean spatialized) {
+    static AudioEq.LimiterConfig limiterFor(Config config, boolean spatialized) {
         if (!spatialized || config.limiter == null) return config.limiter;
         return new AudioEq.LimiterConfig(
                 Math.max(-24f, config.limiter.thresholdDb - SPATIAL_HEADROOM_DB),
@@ -718,8 +722,10 @@ public final class AuroraEngine {
     private void parsePack(Config config, String raw) {
         if (raw == null || raw.isEmpty() || raw.equals("null")) {
             lastPackRaw = "";
+            lastPackBad = "";
             return;
         }
+        if (raw.equals(lastPackBad)) return;
         if (raw.equals(lastPackRaw)) {
             config.bandHz = packBandHz;
             config.maxBoost = packMaxBoost;
@@ -776,9 +782,11 @@ public final class AuroraEngine {
             }
         } catch (Throwable error) {
             Log.w(TAG, "device pack unreadable: " + AudioEq.describe(error));
+            lastPackBad = raw;
             return;
         }
         lastPackRaw = raw;
+        lastPackBad = "";
         packBandHz = bandHz;
         packMaxBoost = maxBoost;
         packLimiter = limiter;

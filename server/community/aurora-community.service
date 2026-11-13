@@ -1,0 +1,13 @@
+[Unit]
+Description=AURORA community server (preset sharing)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/apps/aurora-community
+ExecStart=/usr/bin/node /opt/apps/aurora-community/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

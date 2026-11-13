@@ -164,6 +164,7 @@ private fun AuroraApp() {
     }
 
     val state = remember { AuroraState(context.applicationContext) }
+    val community = remember { CommunityState(context.applicationContext, prefs) }
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
 
@@ -201,6 +202,13 @@ private fun AuroraApp() {
     var adaptationResult by remember { mutableStateOf<String?>(null) }
     var showEditor by remember { mutableStateOf(false) }
     var editorCreating by remember { mutableStateOf(false) }
+    // Diagnostics lives behind the status capsule and a settings row: it is the page you open
+    // when something is wrong, not a place you visit every day.
+    var showDiag by remember { mutableStateOf(false) }
+    var showShare by remember { mutableStateOf(false) }
+    var showIdentity by remember { mutableStateOf(false) }
+    var showMyLikes by remember { mutableStateOf(false) }
+    var detailItem by remember { mutableStateOf<Community.Item?>(null) }
     // The first launch always gets the explanation once. Afterwards it only returns when a fresh
     // boot probe says this device cannot work - that is a new fact, not a nag.
     var showOnboarding by remember {
@@ -345,7 +353,8 @@ private fun AuroraApp() {
                             modifier = Modifier.fillMaxSize()
                         ) { page ->
                             when (page) {
-                                0 -> TonePage(state, dark, scope) { showPresets = true }
+                                0 -> TonePage(state, dark, scope, onOpenPresets = { showPresets = true },
+                                    onStatusClick = { showDiag = true })
                                 1 -> EqPage(
                                     state = state,
                                     dark = dark,
@@ -353,33 +362,19 @@ private fun AuroraApp() {
                                     onOpenEditor = { creating ->
                                         editorCreating = creating
                                         showEditor = true
-                                    }
+                                    },
+                                    onStatusClick = { showDiag = true }
                                 )
-                                2 -> DiagPage(
+                                2 -> CommunityPage(
                                     state = state,
+                                    community = community,
                                     dark = dark,
                                     scope = scope,
-                                    profile = profile,
-                                    adaptation = adaptationResult,
-                                    onRequestAdaptation = {
-                                        adaptationResult = "正在提交…"
-                                        scope.launch {
-                                            val ok = Feedback.reportDevice(
-                                                context.applicationContext,
-                                                profile,
-                                                version.code,
-                                                version.name,
-                                                prefs,
-                                                force = true
-                                            )
-                                            adaptationResult = if (ok) {
-                                                AuroraLog.append(context, "adaptation", "submitted")
-                                                "已提交。这条记录会带着参数级日志，作者能看到卡在哪一段。"
-                                            } else {
-                                                "提交失败，检查一下网络再试。"
-                                            }
-                                        }
-                                    }
+                                    active = tab == 2,
+                                    onOpenShare = { showShare = true },
+                                    onOpenDetail = { detailItem = it },
+                                    onOpenIdentity = { showIdentity = true },
+                                    onStatusClick = { showDiag = true }
                                 )
                                 else -> SettingsPage(
                                     state = state,
@@ -392,9 +387,13 @@ private fun AuroraApp() {
                                     onOpenDevice = { showDevice = true },
                                     onOpenThemes = { showThemes = true },
                                     onFeedback = { showFeedback = true },
+                                    onOpenDiag = { showDiag = true },
+                                    onOpenMyLikes = { showMyLikes = true },
+                                    onOpenIdentity = { showIdentity = true },
                                     checking = updateChecking,
                                     message = updateMessage,
-                                    onCheckUpdate = { runUpdateCheck(manual = true) }
+                                    onCheckUpdate = { runUpdateCheck(manual = true) },
+                                    onStatusClick = { showDiag = true }
                                 )
                             }
                         }
@@ -530,6 +529,54 @@ private fun AuroraApp() {
                     }
                 )
             }
+
+            if (showDiag) {
+                DiagPanel(
+                    state = state,
+                    dark = dark,
+                    scope = scope,
+                    profile = profile,
+                    adaptation = adaptationResult,
+                    onRequestAdaptation = {
+                        adaptationResult = "正在提交…"
+                        scope.launch {
+                            val ok = Feedback.reportDevice(
+                                context.applicationContext,
+                                profile,
+                                version.code,
+                                version.name,
+                                prefs,
+                                force = true
+                            )
+                            adaptationResult = if (ok) {
+                                AuroraLog.append(context, "adaptation", "submitted")
+                                "已提交。这条记录会带着参数级日志，作者能看到卡在哪一段。"
+                            } else {
+                                "提交失败，检查一下网络再试。"
+                            }
+                        }
+                    },
+                    onDismiss = { showDiag = false }
+                )
+            }
+
+            if (showShare) {
+                ShareSheet(state, community, scope, dark) { showShare = false }
+            }
+
+            if (showIdentity) {
+                IdentityPanel(community, scope, dark) { showIdentity = false }
+            }
+
+            if (showMyLikes) {
+                MyLikesPanel(community, scope, dark, onOpenDetail = { detailItem = it }) {
+                    showMyLikes = false
+                }
+            }
+
+            detailItem?.let { item ->
+                CommunityDetailPanel(item, community, state, dark, scope) { detailItem = null }
+            }
         }
     }
 }
@@ -542,7 +589,7 @@ private fun AuroraApp() {
  * object on all four pages.
  */
 @Composable
-private fun StatusStrip(state: AuroraState) {
+internal fun StatusStrip(state: AuroraState, onClick: (() -> Unit)? = null) {
     val colors = MiuixTheme.colorScheme
     val label: String
     val tone: Color
@@ -566,7 +613,17 @@ private fun StatusStrip(state: AuroraState) {
         append("强度 ").append(state.strength).append("%")
     }
     Column(Modifier.fillMaxWidth()) {
-        StatusCapsule(label = label, tone = tone, readings = readings)
+        // The capsule is the state of the engine; the diagnostics panel is where that state is
+        // explained. Tapping the reading to open the explanation is the shortest path there is -
+        // and it is the path you are already looking at when something is wrong.
+        StatusCapsule(
+            label = label,
+            tone = tone,
+            readings = readings,
+            modifier = if (onClick != null) {
+                Modifier.clip(RoundedCornerShape(Radius.block + 4.dp)).clickable(onClick = onClick)
+            } else Modifier
+        )
         // A failed write has to be visible from wherever it happened. It used to be printed at the
         // bottom of one page, so a failed preset tap on the equaliser page looked like nothing
         // happened at all.
@@ -588,7 +645,8 @@ private fun TonePage(
     state: AuroraState,
     dark: Boolean,
     scope: kotlinx.coroutines.CoroutineScope,
-    onOpenPresets: () -> Unit
+    onOpenPresets: () -> Unit,
+    onStatusClick: () -> Unit
 ) {
     val colors = MiuixTheme.colorScheme
     // A hand-edited curve has no preset to name. Saying "原厂平直" there was a lie the screen told
@@ -600,7 +658,7 @@ private fun TonePage(
         else Presets.NOTES[state.presetIndex]
     AuroraPage(
         title = "音效",
-        underTitle = { StatusStrip(state) }
+        underTitle = { StatusStrip(state, onStatusClick) }
     ) {
         AuroraGroup {
             AuroraRow(
@@ -833,7 +891,8 @@ private fun EqPage(
     state: AuroraState,
     dark: Boolean,
     scope: kotlinx.coroutines.CoroutineScope,
-    onOpenEditor: (Boolean) -> Unit
+    onOpenEditor: (Boolean) -> Unit,
+    onStatusClick: () -> Unit
 ) {
     val colors = MiuixTheme.colorScheme
     var strengthDraft by remember(state.strength) { mutableStateOf(state.strength.toFloat()) }
@@ -849,7 +908,7 @@ private fun EqPage(
 
     AuroraPage(
         title = "均衡器",
-        underTitle = { StatusStrip(state) }
+        underTitle = { StatusStrip(state, onStatusClick) }
     ) {
         AuroraGroup("曲线") {
             Column(Modifier.padding(Space.card)) {
@@ -1042,13 +1101,14 @@ internal fun BandRow(
 }
 
 @Composable
-private fun DiagPage(
+private fun DiagPanel(
     state: AuroraState,
     dark: Boolean,
     scope: kotlinx.coroutines.CoroutineScope,
     profile: DeviceProfile,
     adaptation: String?,
-    onRequestAdaptation: () -> Unit
+    onRequestAdaptation: () -> Unit,
+    onDismiss: () -> Unit
 ) {
     val ink = Ink
     val muted = Muted
@@ -1081,9 +1141,14 @@ private fun DiagPage(
             "六段参数都能写入。如果愿意，可以把这台机器的链路档案发回，作者做适配时会拿来对照。"
     }
 
-    AuroraPage(
+    PanelScaffold(
+        dark = dark,
         title = "诊断",
-        underTitle = { StatusStrip(state) }
+        subtitle = "出问题时能自证：先说结论，再摊开回执、会话与链路。",
+        onBack = onDismiss,
+        actions = {
+            PanelButton("关闭", dark, true, Modifier.weight(1f), onDismiss)
+        }
     ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Space.group)) {
             SectionCard {
@@ -1308,9 +1373,13 @@ private fun SettingsPage(
     onOpenDevice: () -> Unit,
     onOpenThemes: () -> Unit,
     onFeedback: () -> Unit,
+    onOpenDiag: () -> Unit,
+    onOpenMyLikes: () -> Unit,
+    onOpenIdentity: () -> Unit,
     checking: Boolean,
     message: String?,
-    onCheckUpdate: () -> Unit
+    onCheckUpdate: () -> Unit,
+    onStatusClick: () -> Unit
 ) {
     val ink = Ink
     val muted = Muted
@@ -1318,7 +1387,7 @@ private fun SettingsPage(
 
     AuroraPage(
         title = "设置",
-        underTitle = { StatusStrip(state = state) }
+        underTitle = { StatusStrip(state, onStatusClick) }
     ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Space.group)) {
             AuroraGroup("外观") {
@@ -1360,6 +1429,24 @@ private fun SettingsPage(
                 )
             }
 
+            AuroraGroup("社区") {
+                EntryRow(
+                    title = "我的喜欢",
+                    detail = "你点过喜欢的曲线，换设备后凭找回码也还在",
+                    action = "查看",
+                    dark = dark,
+                    onClick = onOpenMyLikes
+                )
+                RowDivider()
+                EntryRow(
+                    title = "社区身份",
+                    detail = "昵称、头像与找回码。匿名发布，不需要账号",
+                    action = "管理",
+                    dark = dark,
+                    onClick = onOpenIdentity
+                )
+            }
+
             AuroraGroup("设备") {
                 EntryRow(
                     title = "设备适配",
@@ -1368,6 +1455,14 @@ private fun SettingsPage(
                     action = "查看",
                     dark = dark,
                     onClick = onOpenDevice
+                )
+                RowDivider()
+                EntryRow(
+                    title = "诊断与链路",
+                    detail = "引擎回执、播放会话、实际写入与试听自检",
+                    action = "打开",
+                    dark = dark,
+                    onClick = onOpenDiag
                 )
             }
 

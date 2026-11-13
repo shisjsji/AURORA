@@ -1,0 +1,16 @@
+[Unit]
+Description=AURORA feedback collector
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/apps/aurora-feedback
+ExecStart=/usr/bin/node /opt/apps/aurora-feedback/server.js
+Restart=always
+RestartSec=3
+User=root
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

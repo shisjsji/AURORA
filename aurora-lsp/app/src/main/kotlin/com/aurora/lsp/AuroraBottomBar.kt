@@ -15,7 +15,7 @@ import androidx.compose.ui.unit.sp
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Info
+import top.yukonga.miuix.kmp.icon.extended.Community
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.icon.extended.VolumeUp
@@ -33,7 +33,7 @@ fun AuroraBottomBar(
     val entries = listOf(
         NavEntry("音效", MiuixIcons.VolumeUp),
         NavEntry("均衡", MiuixIcons.Tune),
-        NavEntry("诊断", MiuixIcons.Info),
+        NavEntry("社区", MiuixIcons.Community),
         NavEntry("设置", MiuixIcons.Settings)
     )
     val bottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
