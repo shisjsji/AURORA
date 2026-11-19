@@ -239,8 +239,12 @@ public final class AuroraEngine {
             // The table is picked per session so a fallback triggered by an earlier session in
             // this same tick is already in force for the later ones.
             float[] table = fallbackEngaged ? FALLBACK_HZ : activeTable(config);
-            String desired = desiredSignature(gains, config, table);
+            String desired = testing
+                    ? desiredSignature(gains, config, table)
+                    : desiredSignature(gains, config, table);
             lastGains = gains;
+            // The selftest is a pure -12 dB reference: it must not carry makeup gain.
+            int stageMakeup = testing ? 0 : makeupMb;
             AudioEq.LimiterConfig limiter = limiterFor(config, info.spatialized);
 
             AudioEq eq = effects.get(session);
@@ -268,11 +272,11 @@ public final class AuroraEngine {
                 if (info.spatialized) spatialApplied++;
                 continue;
             }
-            if (!eq.apply(gains, spread, makeupMb, true, table)) {
+            if (!eq.apply(gains, spread, stageMakeup, true, table)) {
                 // The primary table was rejected: a device whose DSP does not accept the 80 Hz
                 // or 10 kHz endpoints still gets a curve, on the table that predates them.
                 if (!fallbackEngaged && !sameTable(table, FALLBACK_HZ)
-                        && eq.apply(gains, spread, makeupMb, true, FALLBACK_HZ)) {
+                        && eq.apply(gains, spread, stageMakeup, true, FALLBACK_HZ)) {
                     fallbackEngaged = true;
                     fellBackThisTick = true;
                     eq.markApplied(desiredSignature(gains, config, FALLBACK_HZ));
@@ -393,7 +397,11 @@ public final class AuroraEngine {
     }
 
     private static String desiredSignature(float[] gains, Config config, float[] table) {
-        return signature(gains) + "s" + config.spread + "l" + config.loudnessMb + "t" + tableTag(table);
+        // The effective makeup (user loudness + maximisation) is part of the signature: without it,
+        // moving the LMH slider alone would leave the LoudnessEnhancer at its old target until the
+        // next curve change.
+        return signature(gains) + "s" + config.spread + "l" + effectiveLoudnessMb(config)
+                + "t" + tableTag(table);
     }
 
     private static String tableTag(float[] table) {

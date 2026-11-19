@@ -58,6 +58,8 @@ public final class AudioEq {
 
     /** Last multiband plan written, so the engine can tell when the shape has to change. */
     private MbcPlan lastMbc;
+    /** Set once a plan write failed on this device: stops the per-tick retry storm. */
+    private boolean mbcBroken;
 
     /** Loudness-guard plumbing: a session Visualizer reading peak/RMS in millibels. */
     private Visualizer visualizer;
@@ -355,6 +357,7 @@ public final class AudioEq {
         bandCount = 0;
         sessionId = 0;
         lastMbc = null;
+        mbcBroken = false;
         applied = false;
         signature = "";
     }
@@ -408,13 +411,14 @@ public final class AudioEq {
      * Writes all six multiband-compressor bands from one plan.
      *
      * <p>The band count comes from the engine's default config (6). If a device reports fewer,
-     * the surplus entries are skipped; a write failure stops the whole plan, because a half-applied
-     * compressor shape is worse than the previous one.
+     * the surplus entries are skipped; a write failure stops the whole plan and neutralises the
+     * stage (all bands at ratio 1), because a half-applied compressor shape is worse than none.
      */
     public synchronized boolean applyMultiband(MbcPlan plan) {
         if (effect == null || mbcBandCtor == null || setMbcBandAll == null || plan == null) {
             return false;
         }
+        if (mbcBroken) return false;
         int bands = MbcPlan.BANDS;
         for (int i = 0; i < bands; i++) {
             try {
@@ -423,6 +427,8 @@ public final class AudioEq {
                 setMbcBandAll.invoke(effect, i, band);
             } catch (Throwable error) {
                 lastError = "mbc band " + i + ": " + describe(error);
+                mbcBroken = true;
+                neutraliseMultiband();
                 return false;
             }
         }
@@ -430,9 +436,24 @@ public final class AudioEq {
         return true;
     }
 
+    /** Writes every band as ratio 1 (no compression), leaving the chain clean after a failure. */
+    private void neutraliseMultiband() {
+        for (int i = 0; i < MbcPlan.BANDS; i++) {
+            try {
+                Object band = mbcBandCtor.newInstance(true, MBC_NEUTRAL_CUTOFF[i],
+                        10f, 100f, 1f, -90f, 6f, -90f, 1f, 0f, 0f);
+                setMbcBandAll.invoke(effect, i, band);
+            } catch (Throwable ignored) {
+            }
+        }
+        lastMbc = null;
+    }
+
+    private static final float[] MBC_NEUTRAL_CUTOFF = {120f, 350f, 1200f, 3500f, 9000f, 20000f};
+
     /** True when this exact plan is already in force. */
     public synchronized boolean multibandMatches(MbcPlan plan) {
-        if (plan == null || lastMbc == null) return false;
+        if (plan == null || lastMbc == null || mbcBroken) return false;
         for (int i = 0; i < MbcPlan.BANDS; i++) {
             if (Math.abs(plan.cutoff[i] - lastMbc.cutoff[i]) > 0.01f) return false;
             if (Math.abs(plan.attackMs[i] - lastMbc.attackMs[i]) > 0.01f) return false;

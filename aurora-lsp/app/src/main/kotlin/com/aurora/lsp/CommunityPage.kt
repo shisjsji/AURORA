@@ -11,6 +11,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.UploadCloud
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -51,16 +54,16 @@ internal fun CommunityPage(
         AuroraGroup("分享") {
             AuroraRow(
                 title = "分享我的曲线",
-                summary = "发布一条你调的曲线，带上机型给同样设备的人参考",
+                leading = { Icon(MiuixIcons.UploadCloud, null, tint = MiuixTheme.colorScheme.onSurfaceVariantSummary) },
                 trailing = { ValueText("发布", accent = true) },
                 onClick = onOpenShare
             )
             RowDivider()
             AuroraRow(
                 title = community.nickname.ifBlank { "社区身份" },
-                summary = "匿名发布 · 找回码可跨重装认领内容",
                 leading = { AvatarBadge(community.avatar, 26.dp) },
                 trailing = { ValueText("管理") },
+                mutedTitle = true,
                 onClick = onOpenIdentity
             )
         }
@@ -98,13 +101,24 @@ internal fun CommunityPage(
                 CommunityState.FeedStatus.Empty -> {
                     PaddedBlock {
                         Column {
+                            Spacer(Modifier.height(8.dp))
                             Text("还没有人分享曲线。", fontSize = 13.sp, color = colors.onSurface)
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "第一条会出现在这里。你的曲线可能正好是别人在找的那条。",
+                                "你的曲线可能正好是别人在找的那条。",
                                 fontSize = 12.sp,
                                 lineHeight = 18.sp,
                                 color = muted
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "发布第一条",
+                                fontSize = 15.sp,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                                color = colors.primary,
+                                modifier = Modifier
+                                    .clickable { onOpenShare() }
+                                    .padding(vertical = 8.dp)
                             )
                         }
                     }

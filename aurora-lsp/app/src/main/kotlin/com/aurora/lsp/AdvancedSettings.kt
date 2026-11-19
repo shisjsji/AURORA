@@ -14,9 +14,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Favorites
+import top.yukonga.miuix.kmp.icon.extended.Messages
+import top.yukonga.miuix.kmp.icon.extended.VolumeUp
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import java.util.Locale
 import kotlin.math.abs
@@ -43,7 +48,6 @@ internal fun AdvancedSettingsPanel(
     Column(Modifier.fillMaxWidth()) {
         SliderRow(
             title = "声场宽度",
-            summary = "左右声道在中高频错开，声音从一个点铺开成一片。低频保持居中，分开会发虚。",
             value = spread.value,
             valueRange = 0f..8f,
             steps = 7,
@@ -54,7 +58,6 @@ internal fun AdvancedSettingsPanel(
         RowDivider()
         SliderRow(
             title = "感知响度",
-            summary = "抬高听感响度而不抬高峰值，安静环境下别开太大；超过 5 dB 时限幅器会自动加严。",
             value = loudness.value,
             valueRange = 0f..10f,
             steps = 9,
@@ -65,7 +68,6 @@ internal fun AdvancedSettingsPanel(
         RowDivider()
         SliderRow(
             title = "响度最大化",
-            summary = "多段压缩加补偿增益，把整体音量感抬高；峰值由限幅器兜底，不是硬放大。",
             value = lmh.value,
             valueRange = 0f..100f,
             steps = 9,
@@ -76,7 +78,7 @@ internal fun AdvancedSettingsPanel(
         RowDivider()
         AuroraRow(
             title = "对话聚焦",
-            summary = "人声与台词往前站：中频加密、200–500 Hz 收回、存在感抬升。",
+            leading = { Icon(MiuixIcons.Messages, null, tint = MiuixTheme.colorScheme.onSurfaceVariantSummary) },
             trailing = {
                 Switch(
                     checked = state.dialog,
@@ -89,7 +91,7 @@ internal fun AdvancedSettingsPanel(
         RowDivider()
         AuroraRow(
             title = "响度守卫",
-            summary = "逐曲测量响度自动对齐，过响的压下来、过轻的抬上去。",
+            leading = { Icon(MiuixIcons.Favorites, null, tint = MiuixTheme.colorScheme.onSurfaceVariantSummary) },
             trailing = {
                 Switch(
                     checked = state.guard,
@@ -111,7 +113,6 @@ private fun rememberDraft(initial: Float) = androidx.compose.runtime.remember(in
 @Composable
 private fun SliderRow(
     title: String,
-    summary: String,
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
     steps: Int,
@@ -122,21 +123,13 @@ private fun SliderRow(
     val colors = MiuixTheme.colorScheme
     Column(Modifier.padding(horizontal = Space.card, vertical = Space.rowV)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(title, fontSize = 15.sp, color = colors.onSurface)
-                Text(
-                    summary,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    color = colors.onSurfaceVariantSummary
-                )
-            }
+            Text(title, fontSize = 15.sp, color = colors.onSurface)
             Spacer(Modifier.width(12.dp))
-            // Both of these default to off, so the mark only shows up once the control is in use.
             ResetAffordance(visible = abs(value) > 0.05f, description = "恢复默认 关") {
                 onChange(0f)
                 onCommit()
             }
+            Spacer(Modifier.weight(1f))
             Text(
                 label,
                 fontSize = 13.sp,

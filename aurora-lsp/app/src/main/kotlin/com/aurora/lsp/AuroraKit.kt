@@ -235,6 +235,8 @@ internal fun AuroraRow(
     summary: String? = null,
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable RowScope.() -> Unit)? = null,
+    /** Quieter title: rows that carry a state (who am I, what is playing) rather than an action. */
+    mutedTitle: Boolean = false,
     onClick: (() -> Unit)? = null
 ) {
     val colors = MiuixTheme.colorScheme
@@ -253,7 +255,11 @@ internal fun AuroraRow(
             Spacer(Modifier.width(Space.iconGap))
         }
         Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 15.sp, color = colors.onSurface)
+            Text(
+                title,
+                fontSize = if (mutedTitle) 13.sp else 15.sp,
+                color = if (mutedTitle) colors.onSurfaceVariantSummary else colors.onSurface
+            )
             if (summary != null) {
                 Spacer(Modifier.height(2.dp))
                 Text(

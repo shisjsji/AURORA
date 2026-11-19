@@ -85,7 +85,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -653,9 +657,6 @@ private fun TonePage(
     // whenever a band had been touched, because looking up "custom" lands on index 0.
     val isCustom = state.preset == "custom"
     val currentTitle = if (isCustom) "自定义曲线" else Presets.NAMES[state.presetIndex]
-    val currentNote =
-        if (isCustom) "六个频段被手动改过，不对应任何预设。"
-        else Presets.NOTES[state.presetIndex]
     AuroraPage(
         title = "音效",
         underTitle = { StatusStrip(state, onStatusClick) }
@@ -685,13 +686,8 @@ private fun TonePage(
                             fontWeight = FontWeight.Medium,
                             color = colors.onSurface
                         )
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            currentNote,
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp,
-                            color = colors.onSurfaceVariantSummary
-                        )
+                        // The note lives in the preset list below; repeating it here made the same
+                        // sentence appear twice on one screen.
                     }
                 }
                 Spacer(Modifier.height(14.dp))
@@ -710,7 +706,7 @@ private fun TonePage(
                 if (index > 0) RowDivider()
                 AuroraRow(
                     title = Presets.NAMES[index],
-                    summary = Presets.NOTES[index],
+                    summary = if (selected) null else Presets.NOTES[index],
                     leading = {
                         EqGlyph(
                             curve = Presets.curve(index),
@@ -744,7 +740,6 @@ private fun TonePage(
             RowDivider()
             AuroraRow(
                 title = "管理预设",
-                summary = "按应用分配，或把手上这条存下来命名",
                 trailing = { ValueText("管理") },
                 onClick = onOpenPresets
             )
@@ -785,6 +780,7 @@ internal fun CurvePreview(
     // Animated, so switching a preset shows the curve moving to its new shape instead of the line
     // teleporting. Six bands, six springs, one gesture.
     val live = rememberAnimatedBands(curve)
+    val measurer = rememberTextMeasurer()
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
@@ -808,6 +804,21 @@ internal fun CurvePreview(
                 end = Offset(w, y),
                 strokeWidth = if (level == 0f) 1.2f else 0.8f
             )
+        }
+        // dB labels on the grid's right edge: without them the grid is decoration, not a scale.
+        if (showScale) {
+            listOf(6f, 0f, -6f).forEach { db ->
+                val y = mid - (db / 12f) * usable
+                val label = if (db > 0f) "+" + db.toInt() else db.toInt().toString()
+                val layout = measurer.measure(
+                    AnnotatedString(label),
+                    style = TextStyle(fontSize = 9.sp, color = grid)
+                )
+                drawText(
+                    layout,
+                    topLeft = Offset(w - layout.size.width - 2.dp.toPx(), y - layout.size.height + 3.dp.toPx())
+                )
+            }
         }
         // One vertical tick per band, so the curve lines up with the labels underneath.
         curve.indices.forEach { index ->
@@ -991,7 +1002,6 @@ private fun EqPage(
             if (state.savedCurve != null) {
                 AuroraRow(
                     title = "恢复自存曲线",
-                    summary = "回到上次保存下来的那条",
                     trailing = { ValueText("恢复", accent = true) },
                     // Replacing the live curve throws away whatever was not saved, so it asks first.
                     onClick = { confirmRestore = true }
@@ -1000,7 +1010,6 @@ private fun EqPage(
             }
             AuroraRow(
                 title = "存为新预设",
-                summary = "给现在这条曲线起个名字，留在「我的预设」里",
                 trailing = { ValueText("保存", accent = true) },
                 onClick = { onOpenEditor(true) }
             )
@@ -1027,7 +1036,7 @@ private fun EqPage(
 @Composable
 private fun EntryRow(
     title: String,
-    detail: String,
+    detail: String? = null,
     action: String,
     dark: Boolean,
     onClick: () -> Unit,
@@ -1414,7 +1423,6 @@ private fun SettingsPage(
             AuroraGroup("交互") {
                 ToggleRow(
                     title = "预测性返回",
-                    detail = "侧滑时页面跟随手指收缩",
                     checked = ui.predictiveBack,
                     dark = dark,
                     onChange = { ui.changePredictiveBack(it) }
@@ -1422,7 +1430,6 @@ private fun SettingsPage(
                 RowDivider()
                 ToggleRow(
                     title = "启动时检查更新",
-                    detail = "只有发现新版本才会提示",
                     checked = ui.autoCheckUpdate,
                     dark = dark,
                     onChange = { ui.changeAutoCheckUpdate(it) }
@@ -1432,7 +1439,6 @@ private fun SettingsPage(
             AuroraGroup("社区") {
                 EntryRow(
                     title = "我的喜欢",
-                    detail = "你点过喜欢的曲线，换设备后凭找回码也还在",
                     action = "查看",
                     dark = dark,
                     onClick = onOpenMyLikes
@@ -1440,7 +1446,6 @@ private fun SettingsPage(
                 RowDivider()
                 EntryRow(
                     title = "社区身份",
-                    detail = "昵称、头像与找回码。匿名发布，不需要账号",
                     action = "管理",
                     dark = dark,
                     onClick = onOpenIdentity
@@ -1450,8 +1455,7 @@ private fun SettingsPage(
             AuroraGroup("设备") {
                 EntryRow(
                     title = "设备适配",
-                    detail = if (deviceSupported) "检测通过，这台机器可以正常使用"
-                    else "查看自动检测停在哪一步",
+                    detail = if (deviceSupported) "已通过" else "未通过",
                     action = "查看",
                     dark = dark,
                     onClick = onOpenDevice
@@ -1459,7 +1463,6 @@ private fun SettingsPage(
                 RowDivider()
                 EntryRow(
                     title = "诊断与链路",
-                    detail = "引擎回执、播放会话、实际写入与试听自检",
                     action = "打开",
                     dark = dark,
                     onClick = onOpenDiag
@@ -1479,20 +1482,45 @@ private fun SettingsPage(
                     RowDivider()
                     NoteText(message)
                 }
-                if (engineVersion > 0 && engineVersion != versionCode) {
-                    RowDivider()
-                    NoteText(
-                        "引擎版本不一致：模块里跑的是 " + engineVersion + "，当前安装的是 " +
-                            versionCode + "。重启设备后生效。",
-                        error = true
-                    )
+            }
+
+            if (engineVersion > 0 && engineVersion != versionCode) {
+                // A stale engine is the one state that makes the whole panel misleading: the app
+                // shows new controls while system_server runs the previous code. It gets its own
+                // card with a left rail and a sentence that says what to do about it.
+                SectionCard {
+                    Row(verticalAlignment = Alignment.Top) {
+                        Box(
+                            Modifier
+                                .width(3.dp)
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(WarnColor)
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "引擎未更新",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = WarnColor
+                            )
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                "模块里跑的是 " + engineVersion + "，当前安装的是 " + versionCode +
+                                    "。重启设备后新引擎才会进入系统。",
+                                fontSize = 12.sp,
+                                lineHeight = 18.sp,
+                                color = muted
+                            )
+                        }
+                    }
                 }
             }
 
             AuroraGroup("反馈") {
                 EntryRow(
                     title = "反馈问题",
-                    detail = "用不了、听不出区别、界面不对，都可以在这里说",
                     action = "去反馈",
                     dark = dark,
                     onClick = onFeedback,
@@ -1526,7 +1554,7 @@ private fun SettingsPage(
 @Composable
 private fun ToggleRow(
     title: String,
-    detail: String,
+    detail: String? = null,
     checked: Boolean,
     dark: Boolean,
     onChange: (Boolean) -> Unit
