@@ -66,8 +66,20 @@ class AuroraState(private val context: Context) {
     var spread by mutableStateOf(0f)
         private set
 
-    /** Perceived loudness boost in dB (LoudnessEnhancer). */
+    /** Perceived loudness boost in dB (LoudnessEnhancer), 0-10. */
     var loudnessDb by mutableStateOf(0f)
+        private set
+
+    /** Loudness maximisation, 0-100. */
+    var lmh by mutableStateOf(0)
+        private set
+
+    /** Dialog focus on/off. */
+    var dialog by mutableStateOf(false)
+        private set
+
+    /** Loudness guard on/off. */
+    var guard by mutableStateOf(true)
         private set
 
     /** Gains the engine actually wrote, as reported back through aurora_backend_bands. */
@@ -116,6 +128,9 @@ class AuroraState(private val context: Context) {
         val appMapRaw: String?,
         val spreadRaw: String?,
         val loudnessRaw: String?,
+        val lmhRaw: String?,
+        val dialogRaw: String?,
+        val guardRaw: String?,
         val bandHzRaw: String?,
         val adaptRaw: String?,
         val packRaw: String?,
@@ -152,6 +167,9 @@ class AuroraState(private val context: Context) {
             appMapRaw = read(AuroraEngine.K_APP_MAP),
             spreadRaw = read(AuroraEngine.K_SPREAD),
             loudnessRaw = read(AuroraEngine.K_LOUDNESS),
+            lmhRaw = read(AuroraEngine.K_LMH),
+            dialogRaw = read(AuroraEngine.K_DIALOG),
+            guardRaw = read(AuroraEngine.K_GUARD),
             bandHzRaw = read(AuroraEngine.R_BANDHZ),
             adaptRaw = read(AuroraEngine.R_ADAPT),
             packRaw = read(AuroraEngine.K_PACK),
@@ -192,6 +210,9 @@ class AuroraState(private val context: Context) {
         appMap = parseAppMap(raw.appMapRaw)
         spread = (raw.spreadRaw?.toIntOrNull() ?: 0) / 10f
         loudnessDb = ((raw.loudnessRaw?.toIntOrNull() ?: 0) / 100f)
+        lmh = (raw.lmhRaw?.toIntOrNull() ?: 0).coerceIn(0, 100)
+        dialog = raw.dialogRaw == "1"
+        guard = raw.guardRaw != "0"
         engineBandHz = parseHz(raw.bandHzRaw)
         adapt = raw.adaptRaw.orEmpty().let { if (it == "null") "" else it }
         packName = raw.packRaw
@@ -329,6 +350,36 @@ class AuroraState(private val context: Context) {
         lastCommand = cmd
         this.spread = spread
         this.loudnessDb = loudnessDb
+        refresh()
+    }
+
+    /** Writes the expansion features: maximisation, dialog focus, loudness guard. */
+    suspend fun updateExpand(
+        lmh: Int = this.lmh,
+        dialog: Boolean = this.dialog,
+        guard: Boolean = this.guard
+    ) {
+        saving = true
+        error = null
+        val cmd = buildString {
+            append("settings put global ").append(AuroraEngine.K_LMH).append(' ')
+            append(lmh.coerceIn(0, 100))
+            append(" && settings put global ").append(AuroraEngine.K_DIALOG).append(' ')
+            append(if (dialog) 1 else 0)
+            append(" && settings put global ").append(AuroraEngine.K_GUARD).append(' ')
+            append(if (guard) 1 else 0)
+            append(" && echo AURORA_OK")
+        }
+        val output = withContext(Dispatchers.IO) { runRoot(cmd) }
+        saving = false
+        if (!output.contains("AURORA_OK")) {
+            error = "保存失败。请确认已给 AURORA 授予 Root 权限。"
+            return
+        }
+        lastCommand = cmd
+        this.lmh = lmh.coerceIn(0, 100)
+        this.dialog = dialog
+        this.guard = guard
         refresh()
     }
 

@@ -1,5 +1,6 @@
 package com.aurora.lsp;
 
+import android.media.audiofx.Visualizer;
 import android.os.Handler;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -34,6 +35,7 @@ public final class AudioEq {
     private static Method setEnabled;
     private static Method hasControl;
     private static Method release;
+    private static Method setInputGainAll;
     private static String resolveError;
 
     // LoudnessEnhancer
@@ -45,6 +47,7 @@ public final class AudioEq {
     private Object effect;
     private Object loudnessEnhancer;
     private int bandCount;
+    private int sessionId;
     private String lastError = "";
     private String signature = "";
     private boolean applied;
@@ -52,6 +55,14 @@ public final class AudioEq {
     private float limiterRatio = 10f;
     private float limiterAttackMs = 5f;
     private float limiterReleaseMs = 60f;
+
+    /** Last multiband plan written, so the engine can tell when the shape has to change. */
+    private MbcPlan lastMbc;
+
+    /** Loudness-guard plumbing: a session Visualizer reading peak/RMS in millibels. */
+    private Visualizer visualizer;
+    private final Visualizer.MeasurementPeakRms peakRms = new Visualizer.MeasurementPeakRms();
+    private boolean guardBroken;
 
     /** Limiter shape for this device; comes from the device pack, or the code default. */
     public static final class LimiterConfig {
@@ -68,6 +79,23 @@ public final class AudioEq {
         }
     }
 
+    /**
+     * Six multiband-compressor bands, written as a whole.
+     *
+     * <p>Only band 0 used to be configured (a fixed low-band compressor). The remaining five sat at
+     * the AOSP defaults - ratio 1, which is no compression at all. This plan drives all six: the
+     * bass band tightens with volume, the mid bands carry the density that makes a phone speaker
+     * sound bigger than it is, and dialog focus borrows bands 2-3.
+     */
+    public static final class MbcPlan {
+        public static final int BANDS = 6;
+        public final float[] cutoff = new float[BANDS];
+        public final float[] attackMs = new float[BANDS];
+        public final float[] releaseMs = new float[BANDS];
+        public final float[] ratio = new float[BANDS];
+        public final float[] thresholdDb = new float[BANDS];
+    }
+
     private static synchronized boolean resolve() {
         if (dpCtor != null) return true;
         if (resolveError != null) return false;
@@ -81,6 +109,7 @@ public final class AudioEq {
             setEnabled = dp.getMethod("setEnabled", boolean.class);
             hasControl = dp.getMethod("hasControl");
             release = dp.getMethod("release");
+            try { setInputGainAll = dp.getMethod("setInputGainAllChannelsTo", float.class); } catch (Throwable ignored) {}
             try {
                 // Limiter(inUse, enabled, linkGroup, attack, release, ratio, threshold, postGain).
                 // The constructor lookup used to ask for (boolean, int, float x5), which matches
@@ -132,6 +161,7 @@ public final class AudioEq {
             lastError = "invalid session " + session;
             return false;
         }
+        sessionId = session;
         if (limiter != null) {
             limiterThreshold = limiter.thresholdDb;
             limiterRatio = limiter.ratio;
@@ -155,7 +185,6 @@ public final class AudioEq {
             } catch (Throwable ignored) {
             }
             enableLimiter();
-            enableBaseCompression();
             openLoudness(session);
             return bandCount > 0;
         } catch (Throwable error) {
@@ -316,9 +345,16 @@ public final class AudioEq {
         if (loudnessEnhancer != null) {
             try { leRelease.invoke(loudnessEnhancer); } catch (Throwable ignored) {}
         }
+        if (visualizer != null) {
+            try { visualizer.setEnabled(false); } catch (Throwable ignored) {}
+            try { visualizer.release(); } catch (Throwable ignored) {}
+            visualizer = null;
+        }
         effect = null;
         loudnessEnhancer = null;
         bandCount = 0;
+        sessionId = 0;
+        lastMbc = null;
         applied = false;
         signature = "";
     }
@@ -368,13 +404,89 @@ public final class AudioEq {
         enableLimiter();
     }
 
-    private void enableBaseCompression() {
-        if (effect == null || mbcBandCtor == null || setMbcBandAll == null) return;
+    /**
+     * Writes all six multiband-compressor bands from one plan.
+     *
+     * <p>The band count comes from the engine's default config (6). If a device reports fewer,
+     * the surplus entries are skipped; a write failure stops the whole plan, because a half-applied
+     * compressor shape is worse than the previous one.
+     */
+    public synchronized boolean applyMultiband(MbcPlan plan) {
+        if (effect == null || mbcBandCtor == null || setMbcBandAll == null || plan == null) {
+            return false;
+        }
+        int bands = MbcPlan.BANDS;
+        for (int i = 0; i < bands; i++) {
+            try {
+                Object band = mbcBandCtor.newInstance(true, plan.cutoff[i], plan.attackMs[i],
+                        plan.releaseMs[i], plan.ratio[i], plan.thresholdDb[i], 6f, -90f, 1f, 0f, 0f);
+                setMbcBandAll.invoke(effect, i, band);
+            } catch (Throwable error) {
+                lastError = "mbc band " + i + ": " + describe(error);
+                return false;
+            }
+        }
+        lastMbc = plan;
+        return true;
+    }
+
+    /** True when this exact plan is already in force. */
+    public synchronized boolean multibandMatches(MbcPlan plan) {
+        if (plan == null || lastMbc == null) return false;
+        for (int i = 0; i < MbcPlan.BANDS; i++) {
+            if (Math.abs(plan.cutoff[i] - lastMbc.cutoff[i]) > 0.01f) return false;
+            if (Math.abs(plan.attackMs[i] - lastMbc.attackMs[i]) > 0.01f) return false;
+            if (Math.abs(plan.releaseMs[i] - lastMbc.releaseMs[i]) > 0.01f) return false;
+            if (Math.abs(plan.ratio[i] - lastMbc.ratio[i]) > 0.01f) return false;
+            if (Math.abs(plan.thresholdDb[i] - lastMbc.thresholdDb[i]) > 0.01f) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Latest RMS level of this session's stream in dBFS, or NaN when no measurement is available.
+     *
+     * <p>The Visualizer is created lazily on first use and died once per behaviour: if creation or
+     * measurement fails on this device, the guard stays quiet for the rest of the session instead
+     * of retrying every poll.
+     */
+    public synchronized float measureRmsDb() {
+        if (sessionId <= 0 || guardBroken) return Float.NaN;
+        if (visualizer == null) {
+            try {
+                visualizer = new Visualizer(sessionId);
+                if (visualizer.setMeasurementMode(Visualizer.MEASUREMENT_MODE_PEAK_RMS) != 0) {
+                    throw new IllegalStateException("measurement mode rejected");
+                }
+                if (visualizer.setEnabled(true) != 0) {
+                    throw new IllegalStateException("enable rejected");
+                }
+            } catch (Throwable error) {
+                guardBroken = true;
+                if (visualizer != null) {
+                    try { visualizer.release(); } catch (Throwable ignored) {}
+                    visualizer = null;
+                }
+                return Float.NaN;
+            }
+        }
         try {
-            Object band = mbcBandCtor.newInstance(
-                    true, 120f, 0.020f, 0.250f, 2.0f, -24f, 6f, -60f, 1.0f, 0f, 0f);
-            setMbcBandAll.invoke(effect, 0, band);
-        } catch (Throwable ignored) {
+            if (visualizer.getMeasurementPeakRms(peakRms) != 0) return Float.NaN;
+            return peakRms.mRms / 100f;
+        } catch (Throwable error) {
+            return Float.NaN;
+        }
+    }
+
+    /** Sets the pre-stage input gain in dB; the loudness guard's only actuator. */
+    public synchronized boolean applyInputGain(float db) {
+        if (effect == null || setInputGainAll == null) return false;
+        try {
+            setInputGainAll.invoke(effect, db);
+            return true;
+        } catch (Throwable error) {
+            lastError = "inputGain: " + describe(error);
+            return false;
         }
     }
 

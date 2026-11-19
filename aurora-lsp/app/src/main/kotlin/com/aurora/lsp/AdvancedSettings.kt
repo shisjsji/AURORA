@@ -15,13 +15,16 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
- * The two engine controls that are not part of the curve: stereo width and perceived loudness.
+ * The engine controls that are not part of the curve: stereo width, perceived loudness, loudness
+ * maximisation, dialog focus and the loudness guard.
  *
  * <p>Same anatomy as every other adjustable row in the app - label, one line of explanation, the
  * current value on the right, the slider underneath - so the equaliser page and this one read as
@@ -35,6 +38,7 @@ internal fun AdvancedSettingsPanel(
     val colors = MiuixTheme.colorScheme
     val spread = rememberDraft(state.spread)
     val loudness = rememberDraft(state.loudnessDb)
+    val lmh = rememberDraft(state.lmh.toFloat())
 
     Column(Modifier.fillMaxWidth()) {
         SliderRow(
@@ -50,13 +54,50 @@ internal fun AdvancedSettingsPanel(
         RowDivider()
         SliderRow(
             title = "感知响度",
-            summary = "抬高听感响度而不抬高峰值，安静环境下别开太大。",
+            summary = "抬高听感响度而不抬高峰值，安静环境下别开太大；超过 5 dB 时限幅器会自动加严。",
             value = loudness.value,
-            valueRange = 0f..5f,
-            steps = 4,
+            valueRange = 0f..10f,
+            steps = 9,
             label = dbLabel(loudness.value),
             onChange = { loudness.value = it },
             onCommit = { scope.launch { state.updateAdvanced(loudnessDb = loudness.value) } }
+        )
+        RowDivider()
+        SliderRow(
+            title = "响度最大化",
+            summary = "多段压缩加补偿增益，把整体音量感抬高；峰值由限幅器兜底，不是硬放大。",
+            value = lmh.value,
+            valueRange = 0f..100f,
+            steps = 9,
+            label = if (lmh.value < 1f) "关" else "${lmh.value.roundToInt()}%",
+            onChange = { lmh.value = it },
+            onCommit = { scope.launch { state.updateExpand(lmh = lmh.value.roundToInt()) } }
+        )
+        RowDivider()
+        AuroraRow(
+            title = "对话聚焦",
+            summary = "人声与台词往前站：中频加密、200–500 Hz 收回、存在感抬升。",
+            trailing = {
+                Switch(
+                    checked = state.dialog,
+                    onCheckedChange = { value ->
+                        scope.launch { state.updateExpand(dialog = value) }
+                    }
+                )
+            }
+        )
+        RowDivider()
+        AuroraRow(
+            title = "响度守卫",
+            summary = "逐曲测量响度自动对齐，过响的压下来、过轻的抬上去。",
+            trailing = {
+                Switch(
+                    checked = state.guard,
+                    onCheckedChange = { value ->
+                        scope.launch { state.updateExpand(guard = value) }
+                    }
+                )
+            }
         )
     }
 }
