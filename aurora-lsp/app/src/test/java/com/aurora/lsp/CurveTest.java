@@ -71,49 +71,24 @@ public class CurveTest {
     }
 
     @Test
-    public void dialogFocusTiltsTheMidWithoutTouchingThePreset() {
-        AuroraEngine.Config plain = config(new float[]{0, 0, 0, 0, 0, 0}, 100);
-        AuroraEngine.Config focused = config(new float[]{0, 0, 0, 0, 0, 0}, 100);
-        focused.dialog = true;
-        float[] a = AuroraEngine.buildGains(plain, speaker(), 100);
-        float[] b = AuroraEngine.buildGains(focused, speaker(), 100);
-        assertTrue("the 200 Hz band must come down", b[1] < a[1] - 1f);
-        assertTrue("the 1.5 kHz band must come up", b[3] > a[3] + 1f);
-        assertTrue("a flat preset is not changed on disk - only the output tilts", Math.abs(a[1]) < 0.01f);
-    }
-
-    @Test
-    public void maximisationDensityRaisesMbcRatios() {
-        AuroraEngine.Config plain = config(new float[]{0, 0, 0, 0, 0, 0}, 100);
-        AuroraEngine.Config loud = config(new float[]{0, 0, 0, 0, 0, 0}, 100);
-        loud.lmh = 100;
-        AudioEq.MbcPlan a = AuroraEngine.buildMbcPlan(plain, 100);
-        AudioEq.MbcPlan b = AuroraEngine.buildMbcPlan(loud, 100);
-        assertTrue("maximisation must compress harder", b.ratio[3] > a.ratio[3]);
-        assertTrue("maximisation moves thresholds earlier", b.thresholdDb[3] < a.thresholdDb[3]);
-        for (int i = 0; i < AudioEq.MbcPlan.BANDS; i++) {
-            assertTrue("ratio stays inside its bounds", b.ratio[i] >= 1f && b.ratio[i] <= 6f);
-            assertTrue("threshold stays inside its bounds",
-                    b.thresholdDb[i] >= -60f && b.thresholdDb[i] <= -6f);
-        }
-    }
-
-    @Test
     public void bassTightensWithVolume() {
-        AuroraEngine.Config plain = config(new float[]{0, 0, 0, 0, 0, 0}, 100);
-        AudioEq.MbcPlan quiet = AuroraEngine.buildMbcPlan(plain, 20);
-        AudioEq.MbcPlan loud = AuroraEngine.buildMbcPlan(plain, 100);
+        AudioEq.MbcPlan quiet = AuroraEngine.buildMbcPlan(20);
+        AudioEq.MbcPlan loud = AuroraEngine.buildMbcPlan(100);
         assertTrue("the bass band compresses harder at high volume", loud.ratio[0] > quiet.ratio[0]);
     }
 
     @Test
-    public void dialogPlanDensifiesThePresenceBands() {
-        AuroraEngine.Config plain = config(new float[]{0, 0, 0, 0, 0, 0}, 100);
-        AuroraEngine.Config dialog = config(new float[]{0, 0, 0, 0, 0, 0}, 100);
-        dialog.dialog = true;
-        AudioEq.MbcPlan a = AuroraEngine.buildMbcPlan(plain, 100);
-        AudioEq.MbcPlan b = AuroraEngine.buildMbcPlan(dialog, 100);
-        assertTrue("the dialog bands compress harder", b.ratio[3] > a.ratio[3]);
-        assertEquals("the bass band is untouched by dialog focus", a.ratio[0], b.ratio[0], 0.001f);
+    public void onlyTheBassBandCompresses() {
+        // Glue compression across the whole spectrum flattened every preset into the same denser
+        // sound, so bands 1-5 must stay at ratio 1 at every volume.
+        for (int volume : new int[]{0, 40, 70, 100}) {
+            AudioEq.MbcPlan plan = AuroraEngine.buildMbcPlan(volume);
+            for (int i = 1; i < AudioEq.MbcPlan.BANDS; i++) {
+                assertEquals("band " + i + " must be transparent at volume " + volume,
+                        1f, plan.ratio[i], 0.0001f);
+            }
+            assertTrue("the bass band always compresses at least a little",
+                    plan.ratio[0] >= 1.8f && plan.ratio[0] <= 3.0f);
+        }
     }
 }

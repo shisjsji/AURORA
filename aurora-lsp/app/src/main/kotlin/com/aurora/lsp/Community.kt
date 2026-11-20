@@ -25,6 +25,10 @@ object Community {
         val model: String,
         val deviceLabel: String,
         val bandHz: String,
+        /** Preset key the curve was published from ("harman", "custom", ...), "" when unknown. */
+        val preset: String,
+        /** Strength the curve was published at, 100 when unknown. */
+        val strength: Int,
         val nickname: String,
         val avatar: String,
         val likes: Int,
@@ -101,6 +105,8 @@ object Community {
             model = json.optString("model"),
             deviceLabel = json.optString("deviceLabel"),
             bandHz = json.optString("bandHz"),
+            preset = json.optString("preset"),
+            strength = json.optInt("strength", 100),
             nickname = json.optString("nickname"),
             avatar = json.optString("avatar"),
             likes = json.optInt("likes"),
@@ -162,7 +168,9 @@ object Community {
         curve: FloatArray,
         model: String,
         deviceLabel: String,
-        bandHz: String
+        bandHz: String,
+        preset: String,
+        strength: Int
     ): Result<PublishResult> = withContext(Dispatchers.IO) {
         val payload = JSONObject().apply {
             put("anonId", anonId)
@@ -171,6 +179,8 @@ object Community {
             put("model", model)
             put("deviceLabel", deviceLabel)
             put("bandHz", bandHz)
+            put("preset", preset)
+            put("strength", strength.coerceIn(0, 100))
         }
         call("/presets", "POST", payload).map { json ->
             PublishResult(

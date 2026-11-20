@@ -1,6 +1,5 @@
 package com.aurora.lsp;
 
-import android.media.audiofx.Visualizer;
 import android.os.Handler;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -35,7 +34,6 @@ public final class AudioEq {
     private static Method setEnabled;
     private static Method hasControl;
     private static Method release;
-    private static Method setInputGainAll;
     private static String resolveError;
 
     // LoudnessEnhancer
@@ -47,7 +45,6 @@ public final class AudioEq {
     private Object effect;
     private Object loudnessEnhancer;
     private int bandCount;
-    private int sessionId;
     private String lastError = "";
     private String signature = "";
     private boolean applied;
@@ -60,11 +57,6 @@ public final class AudioEq {
     private MbcPlan lastMbc;
     /** Set once a plan write failed on this device: stops the per-tick retry storm. */
     private boolean mbcBroken;
-
-    /** Loudness-guard plumbing: a session Visualizer reading peak/RMS in millibels. */
-    private Visualizer visualizer;
-    private final Visualizer.MeasurementPeakRms peakRms = new Visualizer.MeasurementPeakRms();
-    private boolean guardBroken;
 
     /** Limiter shape for this device; comes from the device pack, or the code default. */
     public static final class LimiterConfig {
@@ -84,10 +76,11 @@ public final class AudioEq {
     /**
      * Six multiband-compressor bands, written as a whole.
      *
-     * <p>Only band 0 used to be configured (a fixed low-band compressor). The remaining five sat at
-     * the AOSP defaults - ratio 1, which is no compression at all. This plan drives all six: the
-     * bass band tightens with volume, the mid bands carry the density that makes a phone speaker
-     * sound bigger than it is, and dialog focus borrows bands 2-3.
+     * <p>The plan exists so the engine can be explicit about what each band does. Only band 0 is
+     * ever compressed - the bass stabiliser, tight at volume, loose when quiet. The other five are
+     * written at ratio 1 on purpose: a constant glue compression across the spectrum was tried and
+     * it flattened every preset into the same denser sound, which is the opposite of what a preset
+     * is for.
      */
     public static final class MbcPlan {
         public static final int BANDS = 6;
@@ -111,7 +104,6 @@ public final class AudioEq {
             setEnabled = dp.getMethod("setEnabled", boolean.class);
             hasControl = dp.getMethod("hasControl");
             release = dp.getMethod("release");
-            try { setInputGainAll = dp.getMethod("setInputGainAllChannelsTo", float.class); } catch (Throwable ignored) {}
             try {
                 // Limiter(inUse, enabled, linkGroup, attack, release, ratio, threshold, postGain).
                 // The constructor lookup used to ask for (boolean, int, float x5), which matches
@@ -163,7 +155,6 @@ public final class AudioEq {
             lastError = "invalid session " + session;
             return false;
         }
-        sessionId = session;
         if (limiter != null) {
             limiterThreshold = limiter.thresholdDb;
             limiterRatio = limiter.ratio;
@@ -347,15 +338,9 @@ public final class AudioEq {
         if (loudnessEnhancer != null) {
             try { leRelease.invoke(loudnessEnhancer); } catch (Throwable ignored) {}
         }
-        if (visualizer != null) {
-            try { visualizer.setEnabled(false); } catch (Throwable ignored) {}
-            try { visualizer.release(); } catch (Throwable ignored) {}
-            visualizer = null;
-        }
         effect = null;
         loudnessEnhancer = null;
         bandCount = 0;
-        sessionId = 0;
         lastMbc = null;
         mbcBroken = false;
         applied = false;
@@ -462,53 +447,6 @@ public final class AudioEq {
             if (Math.abs(plan.thresholdDb[i] - lastMbc.thresholdDb[i]) > 0.01f) return false;
         }
         return true;
-    }
-
-    /**
-     * Latest RMS level of this session's stream in dBFS, or NaN when no measurement is available.
-     *
-     * <p>The Visualizer is created lazily on first use and died once per behaviour: if creation or
-     * measurement fails on this device, the guard stays quiet for the rest of the session instead
-     * of retrying every poll.
-     */
-    public synchronized float measureRmsDb() {
-        if (sessionId <= 0 || guardBroken) return Float.NaN;
-        if (visualizer == null) {
-            try {
-                visualizer = new Visualizer(sessionId);
-                if (visualizer.setMeasurementMode(Visualizer.MEASUREMENT_MODE_PEAK_RMS) != 0) {
-                    throw new IllegalStateException("measurement mode rejected");
-                }
-                if (visualizer.setEnabled(true) != 0) {
-                    throw new IllegalStateException("enable rejected");
-                }
-            } catch (Throwable error) {
-                guardBroken = true;
-                if (visualizer != null) {
-                    try { visualizer.release(); } catch (Throwable ignored) {}
-                    visualizer = null;
-                }
-                return Float.NaN;
-            }
-        }
-        try {
-            if (visualizer.getMeasurementPeakRms(peakRms) != 0) return Float.NaN;
-            return peakRms.mRms / 100f;
-        } catch (Throwable error) {
-            return Float.NaN;
-        }
-    }
-
-    /** Sets the pre-stage input gain in dB; the loudness guard's only actuator. */
-    public synchronized boolean applyInputGain(float db) {
-        if (effect == null || setInputGainAll == null) return false;
-        try {
-            setInputGainAll.invoke(effect, db);
-            return true;
-        } catch (Throwable error) {
-            lastError = "inputGain: " + describe(error);
-            return false;
-        }
     }
 
     static String describe(Throwable error) {

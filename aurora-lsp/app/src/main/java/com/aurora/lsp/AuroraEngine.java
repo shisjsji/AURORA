@@ -39,12 +39,6 @@ public final class AuroraEngine {
     /** Advanced settings: spread (stereo widening) and perceived loudness. */
     public static final String K_SPREAD = "aurora_spread";
     public static final String K_LOUDNESS = "aurora_loudness";
-    /** Loudness maximisation, 0-100: compression density plus makeup, guarded by the limiter. */
-    public static final String K_LMH = "aurora_lmh";
-    /** Dialog focus, 0/1: denser presence band and a lighter 200-500 Hz. */
-    public static final String K_DIALOG = "aurora_dialog";
-    /** Loudness guard, 0/1: per-track RMS leveling through the pre-stage input gain. */
-    public static final String K_GUARD = "aurora_guard";
     /** Per-device adaptation written by the app after fetching the matching device pack. */
     public static final String K_PACK = "aurora_device_pack";
 
@@ -78,10 +72,6 @@ public final class AuroraEngine {
     private static final float[] MBC_CUTOFF_HZ = {120f, 350f, 1200f, 3500f, 9000f, 20000f};
     private static final float[] MBC_ATTACK_MS = {20f, 25f, 25f, 15f, 10f, 10f};
     private static final float[] MBC_RELEASE_MS = {250f, 200f, 200f, 150f, 120f, 100f};
-    private static final float[] MBC_BASE_RATIO = {2.0f, 1.5f, 1.5f, 1.5f, 1.5f, 1.2f};
-    private static final float[] MBC_BASE_THRESHOLD_DB = {-24f, -28f, -30f, -30f, -32f, -36f};
-
-    private static final long GUARD_MS = 250L;
 
     /**
      * Per-band ceiling. 80 Hz and 10 kHz are the widest; 200 Hz stays low because pushing the
@@ -137,9 +127,6 @@ public final class AuroraEngine {
 
     /** Set once the default/pack table is rejected and the legacy table took over; cleared by reboot. */
     private boolean fallbackEngaged;
-    /** Loudness guard state per session: smoothed RMS and the gain currently applied. */
-    private final Map<Integer, Float> guardEma = new HashMap<>();
-    private final Map<Integer, Float> guardGain = new HashMap<>();
     /** Cached parse of aurora_device_pack: JSON is only walked when the raw string changes. */
     private String lastPackRaw = "";
     /** A raw string that failed to parse, so it is not re-parsed every tick. */
@@ -193,8 +180,6 @@ public final class AuroraEngine {
         } catch (Throwable error) {
             Log.w(TAG, "playback callback unavailable: " + AudioEq.describe(error));
         }
-        // The loudness guard measures much faster than the 2 s curve tick.
-        handler.postDelayed(guardPoll, GUARD_MS);
     }
 
     public void tick() {
@@ -225,8 +210,7 @@ public final class AuroraEngine {
 
         long now = android.os.SystemClock.elapsedRealtime();
         int volume = musicVolumePercent();
-        AudioEq.MbcPlan mbcPlan = buildMbcPlan(config, volume);
-        int makeupMb = effectiveLoudnessMb(config);
+        AudioEq.MbcPlan mbcPlan = buildMbcPlan(volume);
 
         int skipped = 0;
         for (Map.Entry<Integer, SessionInfo> entry : sessions.entrySet()) {
@@ -239,12 +223,10 @@ public final class AuroraEngine {
             // The table is picked per session so a fallback triggered by an earlier session in
             // this same tick is already in force for the later ones.
             float[] table = fallbackEngaged ? FALLBACK_HZ : activeTable(config);
-            String desired = testing
-                    ? desiredSignature(gains, config, table)
-                    : desiredSignature(gains, config, table);
+            String desired = desiredSignature(gains, config, table);
             lastGains = gains;
             // The selftest is a pure -12 dB reference: it must not carry makeup gain.
-            int stageMakeup = testing ? 0 : makeupMb;
+            int stageMakeup = testing ? 0 : config.loudnessMb;
             AudioEq.LimiterConfig limiter = limiterFor(config, info.spatialized);
 
             AudioEq eq = effects.get(session);
@@ -307,76 +289,49 @@ public final class AuroraEngine {
         }
         if (!failure.isEmpty()) message += " 部分会话失败：" + failure;
         if (skipped > 0) message += " 会话数已达上限，跳过 " + skipped + " 个。";
-        float guardMax = guardExtreme();
-        if (guardMax >= 0.5f) {
-            message += " 响度守卫 ±" + Math.round(guardMax) + " dB。";
-        }
         report(testing ? "selftest" : "active", message, lastGains, applied,
                 tableFor(config), adaptString(config));
     }
 
     /**
      * The limiter actually in force for one session: the pack's (or default) shape, deepened when
-     * that session is being spatialized, and pulled down when makeup gain has been added, because
-     * extra gain means an earlier ceiling. Returns the original instance when nothing changed.
+     * that session is being spatialized. Returns the original instance when nothing changed.
      *
      * <p>Package-private so the clamp rule itself has a test on a plain JVM.
      */
     static AudioEq.LimiterConfig limiterFor(Config config, boolean spatialized) {
         AudioEq.LimiterConfig base = config.limiter;
         if (base == null) return null;
-        float threshold = base.thresholdDb;
-        if (spatialized) threshold -= SPATIAL_HEADROOM_DB;
-        int makeup = effectiveLoudnessMb(config);
-        if (makeup > 500) {
-            threshold -= (makeup - 500) / 100f;   // drop 1 dB of ceiling per dB of makeup past +5
-        }
-        threshold -= config.lmh / 100f * 3f;      // maximisation leans on the limiter harder
-        threshold = Math.max(-24f, threshold);
-        if (threshold == base.thresholdDb) return base;
+        if (!spatialized) return base;
+        float threshold = Math.max(-24f, base.thresholdDb - SPATIAL_HEADROOM_DB);
         return new AudioEq.LimiterConfig(threshold, base.ratio, base.attackMs, base.releaseMs);
     }
 
-    /** LoudnessEnhancer target in millibels: the user's setting plus the maximisation makeup. */
-    static int effectiveLoudnessMb(Config config) {
-        int total = config.loudnessMb + Math.round(config.lmh * 6f);
-        return Math.max(0, Math.min(1000, total));
-    }
-
     /**
-     * The six-band compressor plan for this volume.
+     * The multiband compressor plan for this volume.
      *
-     * <p>Band 0 is the dynamic bass stage: tight at high volume, loose at low volume. Bands 1-5
-     * carry the density that makes a phone speaker sound bigger, and dialog focus borrows the
-     * presence bands. Maximisation adds ratio and moves every threshold earlier.
+     * <p>Only band 0 does anything: it is the bass stabiliser - tight at high volume, loose at low
+     * volume - and it exists to keep the speaker's excursion under control, not to shape the
+     * sound. Bands 1-5 are written at ratio 1: a constant glue compression across the spectrum
+     * made every preset sound like the same, denser thing, which is exactly the opposite of what
+     * a preset is for.
      *
      * <p>Package-private so the shape has a test on a plain JVM.
      */
-    static AudioEq.MbcPlan buildMbcPlan(Config config, int volumePercent) {
+    static AudioEq.MbcPlan buildMbcPlan(int volumePercent) {
         AudioEq.MbcPlan plan = new AudioEq.MbcPlan();
-        float lmh = config.lmh / 100f;
         float tight = Math.max(0f, Math.min(1f, (volumePercent - 40f) / 60f));
         for (int i = 0; i < AudioEq.MbcPlan.BANDS; i++) {
             plan.cutoff[i] = MBC_CUTOFF_HZ[i];
             plan.attackMs[i] = MBC_ATTACK_MS[i];
             plan.releaseMs[i] = MBC_RELEASE_MS[i];
-            float ratio;
-            float threshold;
             if (i == 0) {
-                ratio = 1.8f + 1.2f * tight;
-                threshold = -22f - 4f * tight;
+                plan.ratio[i] = 1.8f + 1.2f * tight;
+                plan.thresholdDb[i] = -22f - 4f * tight;
             } else {
-                ratio = MBC_BASE_RATIO[i];
-                threshold = MBC_BASE_THRESHOLD_DB[i];
+                plan.ratio[i] = 1f;          // transparent: no glue compression
+                plan.thresholdDb[i] = -24f;
             }
-            if (config.dialog && (i == 2 || i == 3)) {
-                ratio = Math.max(ratio, 3f);
-                threshold = Math.min(threshold, -26f);
-            }
-            ratio *= 1f + lmh * 1.2f;
-            threshold += -lmh * 8f;
-            plan.ratio[i] = Math.max(1f, Math.min(6f, ratio));
-            plan.thresholdDb[i] = Math.max(-60f, Math.min(-6f, threshold));
         }
         return plan;
     }
@@ -397,10 +352,7 @@ public final class AuroraEngine {
     }
 
     private static String desiredSignature(float[] gains, Config config, float[] table) {
-        // The effective makeup (user loudness + maximisation) is part of the signature: without it,
-        // moving the LMH slider alone would leave the LoudnessEnhancer at its old target until the
-        // next curve change.
-        return signature(gains) + "s" + config.spread + "l" + effectiveLoudnessMb(config)
+        return signature(gains) + "s" + config.spread + "l" + config.loudnessMb
                 + "t" + tableTag(table);
     }
 
@@ -437,8 +389,6 @@ public final class AuroraEngine {
             lastSeen.remove(session);
             AudioEq eq = effects.remove(session);
             if (eq != null) eq.close();
-            guardEma.remove(session);
-            guardGain.remove(session);
         }
     }
 
@@ -446,65 +396,6 @@ public final class AuroraEngine {
         for (AudioEq eq : effects.values()) eq.close();
         effects.clear();
         lastSeen.clear();
-        guardEma.clear();
-        guardGain.clear();
-    }
-
-    /** The largest input-gain correction the guard is currently applying, in dB. */
-    private float guardExtreme() {
-        float extreme = 0f;
-        for (float gain : guardGain.values()) extreme = Math.max(extreme, Math.abs(gain));
-        return extreme;
-    }
-
-    /**
-     * Loudness guard: measure each session's RMS every 250 ms and level it towards -20 dBFS
-     * through the pre-stage input gain, ±4 dB, at most 0.5 dB per poll.
-     *
-     * <p>Only acts while a session is actually playing something audible; a pause leaves the gain
-     * untouched, so a track does not get re-leveled during a silent intro. Any device where the
-     * Visualizer cannot be created simply gets no guard - the curve path is unaffected.
-     */
-    private final Runnable guardPoll = new Runnable() {
-        @Override
-        public void run() {
-            Handler handler = engineHandler;
-            if (handler == null) return;
-            try {
-                guardTick();
-            } catch (Throwable error) {
-                Log.w(TAG, "loudness guard: " + AudioEq.describe(error));
-            }
-            handler.postDelayed(this, GUARD_MS);
-        }
-    };
-
-    private void guardTick() {
-        Config config = lastGood;
-        boolean active = config != null && config.enabled && !config.panic && config.guard;
-        if (!active || effects.isEmpty()) {
-            if (!guardGain.isEmpty()) {
-                for (AudioEq eq : effects.values()) eq.applyInputGain(0f);
-                guardGain.clear();
-                guardEma.clear();
-            }
-            return;
-        }
-        for (Map.Entry<Integer, AudioEq> entry : effects.entrySet()) {
-            int session = entry.getKey();
-            float rms = entry.getValue().measureRmsDb();
-            if (Float.isNaN(rms) || rms < -50f) continue;
-            Float previous = guardEma.get(session);
-            float ema = previous == null ? rms : previous * 0.7f + rms * 0.3f;
-            guardEma.put(session, ema);
-            float desired = Math.max(-4f, Math.min(4f, -20f - ema));
-            float current = guardGain.containsKey(session) ? guardGain.get(session) : 0f;
-            float next = current + Math.max(-0.5f, Math.min(0.5f, desired - current));
-            if (Math.abs(next - current) < 0.3f) continue;
-            if (entry.getValue().applyInputGain(next)) {
-                guardGain.put(session, next);
-            }
-        }
     }
 
     private Map<Integer, SessionInfo> activeSessions() {
@@ -652,14 +543,6 @@ public final class AuroraEngine {
 
         applyVolumeCompensation(out, volumePercent);
         applyRouteTrim(out, info);
-        // Dialog focus is a curve correction on top of whatever the user chose: it must not touch
-        // the preset itself, only the signal that leaves this stage.
-        if (config.dialog) {
-            out[1] -= 2f;    // 200-500 Hz: the boxiness that fights intelligibility
-            out[3] += 2f;    // 1.5k presence
-            out[4] += 1.5f;  // 4k clarity
-        }
-
         float loudest = -AudioEq.MAX_DB;
         for (int i = 0; i < AudioEq.BANDS; i++) loudest = Math.max(loudest, out[i]);
         if (loudest > 6f) {
@@ -799,9 +682,6 @@ public final class AuroraEngine {
             config.appMap = parseAppMap(Settings.Global.getString(resolver, K_APP_MAP));
             config.spread = clamp(Settings.Global.getInt(resolver, K_SPREAD, 0), 0, 80) / 10f;
             config.loudnessMb = clamp(Settings.Global.getInt(resolver, K_LOUDNESS, 0), 0, 1000);
-            config.lmh = clamp(Settings.Global.getInt(resolver, K_LMH, 0), 0, 100);
-            config.dialog = Settings.Global.getInt(resolver, K_DIALOG, 0) == 1;
-            config.guard = Settings.Global.getInt(resolver, K_GUARD, 1) == 1;
             parsePack(config, Settings.Global.getString(resolver, K_PACK));
             // An unknown key still resolves to the flat curve - that is the safe value - but it
             // used to do so silently, which looks exactly like "the module does nothing". Say it
@@ -981,12 +861,6 @@ public final class AuroraEngine {
         float spread;
         /** LoudnessEnhancer target gain in millibels, 0–1000 (0–10 dB). */
         int loudnessMb;
-        /** Loudness maximisation, 0–100. */
-        int lmh;
-        /** Dialog focus on/off. */
-        boolean dialog;
-        /** Loudness guard on/off (defaults to on). */
-        boolean guard = true;
         /** Device pack overrides; null means the compiled-in defaults. */
         float[] bandHz;
         float[] maxBoost;

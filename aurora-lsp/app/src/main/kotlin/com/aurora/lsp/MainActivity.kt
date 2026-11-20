@@ -691,8 +691,13 @@ private fun TonePage(
                     }
                 }
                 Spacer(Modifier.height(14.dp))
+                // What the engine actually wrote, not the stored curve: strength, the equal-loudness
+                // tilt, the 6 dB preamp ceiling and the per-band caps all move the real curve away
+                // from the raw preset, and showing the raw one made the screen promise more boost
+                // than the speaker was ever given. Falls back to the stored curve before the first
+                // engine report.
                 CurvePreview(
-                    state.curve,
+                    state.actualBands ?: state.curve,
                     colors.primary,
                     colors.dividerLine,
                     showScale = true

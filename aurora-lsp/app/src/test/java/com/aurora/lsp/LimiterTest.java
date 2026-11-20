@@ -41,27 +41,12 @@ public class LimiterTest {
     }
 
     @Test
-    public void makeupTightensTheCeiling() {
+    public void makeupDoesNotMoveTheLimiter() {
+        // The LoudnessEnhancer sits downstream of this limiter, so makeup gain cannot be paid for
+        // with an earlier ceiling - doing that only made maximisation cancel itself out.
         AuroraEngine.Config config = new AuroraEngine.Config();
-        config.loudnessMb = 800;   // +8 dB: 3 dB past the free 5 dB
-        assertEquals("each dB of makeup past +5 takes a dB of ceiling",
-                -9f, AuroraEngine.limiterFor(config, false).thresholdDb, 0.001f);
-        config.loudnessMb = 0;
-        config.lmh = 100;
-        // Maximisation adds +6 dB of makeup (1 dB past the free 5) and its own 3 dB of linkage.
-        assertEquals("full maximisation tightens by 4 dB in total",
-                -10f, AuroraEngine.limiterFor(config, false).thresholdDb, 0.001f);
-    }
-
-    @Test
-    public void makeupSumsUserSettingAndMaximisation() {
-        AuroraEngine.Config config = new AuroraEngine.Config();
-        config.loudnessMb = 300;
-        config.lmh = 100;
-        assertEquals("300 mB user + 600 mB maximisation", 900,
-                AuroraEngine.effectiveLoudnessMb(config));
-        config.loudnessMb = 800;
-        assertEquals("the total is clamped at +10 dB", 1000,
-                AuroraEngine.effectiveLoudnessMb(config));
+        config.loudnessMb = 1000;
+        assertEquals("the ceiling stays where the pack put it",
+                config.limiter.thresholdDb, AuroraEngine.limiterFor(config, false).thresholdDb, 0.001f);
     }
 }

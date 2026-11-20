@@ -136,10 +136,12 @@ class CommunityState(
         curve: FloatArray,
         model: String,
         deviceLabel: String,
-        bandHz: String
+        bandHz: String,
+        preset: String = "",
+        strength: Int = 100
     ): Community.Result<Community.PublishResult> {
         error = null
-        val result = Community.publish(anonId, name, curve, model, deviceLabel, bandHz)
+        val result = Community.publish(anonId, name, curve, model, deviceLabel, bandHz, preset, strength)
         if (result is Community.Result.Ok) {
             result.value.recoveryKey?.let { freshRecoveryKey = it }
         } else if (result is Community.Result.Denied) {

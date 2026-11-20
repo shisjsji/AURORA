@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS presets (
   model TEXT NOT NULL,
   device_label TEXT NOT NULL,
   band_hz TEXT NOT NULL DEFAULT '',
+  preset TEXT NOT NULL DEFAULT '',
+  strength INTEGER NOT NULL DEFAULT 100,
   likes_count INTEGER NOT NULL DEFAULT 0,
   comment_count INTEGER NOT NULL DEFAULT 0,
   hidden INTEGER NOT NULL DEFAULT 0,
@@ -69,6 +71,20 @@ CREATE TABLE IF NOT EXISTS comments (
 CREATE INDEX IF NOT EXISTS idx_presets_created ON presets(hidden, id DESC);
 CREATE INDEX IF NOT EXISTS idx_comments_preset ON comments(preset_id, id);
 `);
+
+/**
+ * Columns added after the table shipped. `CREATE TABLE IF NOT EXISTS` leaves an existing table
+ * alone, so the live database needs the columns bolted on rather than recreated.
+ */
+for (const [name, decl] of [
+  ['preset', "TEXT NOT NULL DEFAULT ''"],
+  ['strength', 'INTEGER NOT NULL DEFAULT 100'],
+]) {
+  const columns = db.prepare('PRAGMA table_info(presets)').all().map((c) => c.name);
+  if (!columns.includes(name)) {
+    db.exec(`ALTER TABLE presets ADD COLUMN ${name} ${decl}`);
+  }
+}
 
 const adminToken = (() => {
   try {
@@ -148,6 +164,8 @@ function card(row, viewerAccountId, likedKnown) {
     model: row.model,
     deviceLabel: row.device_label,
     bandHz: row.band_hz,
+    preset: row.preset || '',
+    strength: row.strength === null || row.strength === undefined ? 100 : row.strength,
     nickname: row.nickname,
     avatar: row.avatar,
     likes: row.likes_count,
@@ -349,13 +367,20 @@ function handle(req, res, route, url, body) {
     const model = str(body.model, 64);
     const deviceLabel = str(body.deviceLabel, 24);
     const bandHz = typeof body.bandHz === 'string' ? body.bandHz.slice(0, 40) : '';
+    // 发布者当时的预设与强度，只用于在详情页说明来源。旧版客户端不带这两个字段。
+    const preset = /^[a-z0-9_-]{1,24}$/.test(body.preset || '') ? body.preset : '';
+    const rawStrength = Number(body.strength);
+    const strength = Number.isFinite(rawStrength)
+      ? Math.min(100, Math.max(0, Math.round(rawStrength)))
+      : 100;
     if (!anonId || !name || !curve || !model || !deviceLabel) {
       return reply(res, 400, { ok: false, error: 'name, curve, model, deviceLabel required' });
     }
     const { account, created } = ensureAccount(anonId);
     const result = db.prepare(
-      'INSERT INTO presets (account_id, name, curve, model, device_label, band_hz, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(account.id, name, curve, model, deviceLabel, bandHz, Date.now());
+      'INSERT INTO presets (account_id, name, curve, model, device_label, band_hz, preset, strength, created_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(account.id, name, curve, model, deviceLabel, bandHz, preset, strength, Date.now());
     return reply(res, 200, {
       ok: true,
       id: Number(result.lastInsertRowid),

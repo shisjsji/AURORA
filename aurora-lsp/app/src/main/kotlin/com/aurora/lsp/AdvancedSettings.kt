@@ -14,36 +14,25 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Slider
-import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Favorites
-import top.yukonga.miuix.kmp.icon.extended.Messages
-import top.yukonga.miuix.kmp.icon.extended.VolumeUp
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 /**
- * The engine controls that are not part of the curve: stereo width, perceived loudness, loudness
- * maximisation, dialog focus and the loudness guard.
+ * The two engine controls that are not part of the curve: stereo width and perceived loudness.
  *
- * <p>Same anatomy as every other adjustable row in the app - label, one line of explanation, the
- * current value on the right, the slider underneath - so the equaliser page and this one read as
- * the same instrument rather than two different apps.
+ * <p>Perceived loudness carries one line of explanation because it is the one control here whose
+ * trade-off is not obvious from its name: the enhancer adds loudness by compressing dynamics.
  */
 @Composable
 internal fun AdvancedSettingsPanel(
     state: AuroraState,
     scope: CoroutineScope
 ) {
-    val colors = MiuixTheme.colorScheme
     val spread = rememberDraft(state.spread)
     val loudness = rememberDraft(state.loudnessDb)
-    val lmh = rememberDraft(state.lmh.toFloat())
 
     Column(Modifier.fillMaxWidth()) {
         SliderRow(
@@ -58,48 +47,13 @@ internal fun AdvancedSettingsPanel(
         RowDivider()
         SliderRow(
             title = "感知响度",
+            summary = "增强听感响度，会压缩动态",
             value = loudness.value,
             valueRange = 0f..10f,
             steps = 9,
             label = dbLabel(loudness.value),
             onChange = { loudness.value = it },
             onCommit = { scope.launch { state.updateAdvanced(loudnessDb = loudness.value) } }
-        )
-        RowDivider()
-        SliderRow(
-            title = "响度最大化",
-            value = lmh.value,
-            valueRange = 0f..100f,
-            steps = 9,
-            label = if (lmh.value < 1f) "关" else "${lmh.value.roundToInt()}%",
-            onChange = { lmh.value = it },
-            onCommit = { scope.launch { state.updateExpand(lmh = lmh.value.roundToInt()) } }
-        )
-        RowDivider()
-        AuroraRow(
-            title = "对话聚焦",
-            leading = { Icon(MiuixIcons.Messages, null, tint = MiuixTheme.colorScheme.onSurfaceVariantSummary) },
-            trailing = {
-                Switch(
-                    checked = state.dialog,
-                    onCheckedChange = { value ->
-                        scope.launch { state.updateExpand(dialog = value) }
-                    }
-                )
-            }
-        )
-        RowDivider()
-        AuroraRow(
-            title = "响度守卫",
-            leading = { Icon(MiuixIcons.Favorites, null, tint = MiuixTheme.colorScheme.onSurfaceVariantSummary) },
-            trailing = {
-                Switch(
-                    checked = state.guard,
-                    onCheckedChange = { value ->
-                        scope.launch { state.updateExpand(guard = value) }
-                    }
-                )
-            }
         )
     }
 }
@@ -113,6 +67,7 @@ private fun rememberDraft(initial: Float) = androidx.compose.runtime.remember(in
 @Composable
 private fun SliderRow(
     title: String,
+    summary: String? = null,
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
     steps: Int,
@@ -123,13 +78,25 @@ private fun SliderRow(
     val colors = MiuixTheme.colorScheme
     Column(Modifier.padding(horizontal = Space.card, vertical = Space.rowV)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(title, fontSize = 15.sp, color = colors.onSurface)
-            Spacer(Modifier.width(12.dp))
-            ResetAffordance(visible = abs(value) > 0.05f, description = "恢复默认 关") {
-                onChange(0f)
-                onCommit()
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, fontSize = 15.sp, color = colors.onSurface)
+                    Spacer(Modifier.width(12.dp))
+                    ResetAffordance(visible = abs(value) > 0.05f, description = "恢复默认 关") {
+                        onChange(0f)
+                        onCommit()
+                    }
+                }
+                if (summary != null) {
+                    Text(
+                        summary,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        color = colors.onSurfaceVariantSummary
+                    )
+                }
             }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(12.dp))
             Text(
                 label,
                 fontSize = 13.sp,

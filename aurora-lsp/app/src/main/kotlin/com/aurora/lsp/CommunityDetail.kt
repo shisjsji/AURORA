@@ -70,7 +70,8 @@ internal fun CommunityDetailPanel(
     PanelScaffold(
         dark = dark,
         title = current.name,
-        subtitle = current.nickname + " · " + current.deviceLabel,
+        subtitle = current.nickname + " · " + current.deviceLabel +
+            publishInfo(current),
         onBack = onDismiss,
         actions = {
             PanelButton(
@@ -99,8 +100,12 @@ internal fun CommunityDetailPanel(
                     scope.launch {
                         saving = true
                         state.savePreset(current.name, current.curve)
+                        // The publisher handed over a curve they tuned at their own strength. Apply
+                        // it at 100% so it sounds like the one they published, not the one this
+                        // install happened to have dialled in.
+                        state.setStrength(100)
                         saving = false
-                        saveNote = "已保存。去「均衡」页的“我的预设”里就能找到它。"
+                        saveNote = "已保存，强度已设为 100%。去「均衡」页的“我的预设”里就能找到它。"
                     }
                 }
             )
@@ -230,6 +235,18 @@ internal fun CommunityDetailPanel(
             }
         }
     }
+}
+
+/** " · 基于 柏林之声 · 强度 80%", or nothing when the publisher's app did not say. */
+private fun publishInfo(item: Community.Item): String {
+    val presetName = when {
+        item.preset.isEmpty() -> return ""
+        item.preset == "custom" -> "自定义曲线"
+        Presets.hasKey(item.preset) -> Presets.NAMES[Presets.indexOf(item.preset)]
+        else -> return ""
+    }
+    val strength = if (item.strength in 1..100) " · 强度 ${item.strength}%" else ""
+    return " · 基于 $presetName$strength"
 }
 
 /** "250,500,1000,2000,4000,6300" -> floats; anything else -> null (use the default table). */

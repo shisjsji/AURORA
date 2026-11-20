@@ -94,7 +94,9 @@ internal fun ShareSheet(
                                 curve = curve,
                                 model = state.device.model,
                                 deviceLabel = deviceLabel,
-                                bandHz = bandHz
+                                bandHz = bandHz,
+                                preset = state.preset,
+                                strength = state.strength
                             )) {
                                 is Community.Result.Ok -> published = true
                                 is Community.Result.Denied -> note = community.error
