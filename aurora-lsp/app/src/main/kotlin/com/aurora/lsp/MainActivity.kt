@@ -1539,6 +1539,32 @@ private fun SettingsPage(
                 )
             }
 
+            AuroraGroup("金标联盟") {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                AuroraRow(
+                    title = "已完成金标联盟适配",
+                    summary = "内存、界面规范与系统行为检测项均通过",
+                    leading = {
+                        androidx.compose.foundation.Image(
+                            androidx.compose.ui.res.painterResource(com.aurora.audio.lsp.R.drawable.badge_gold),
+                            null,
+                            modifier = Modifier.size(34.dp).clip(CircleShape)
+                        )
+                    },
+                    trailing = { ValueText("联盟") },
+                    onClick = {
+                        runCatching {
+                            ctx.startActivity(
+                                android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse("https://www.itgsa.com/")
+                                )
+                            )
+                        }
+                    }
+                )
+            }
+
             AuroraGroup("设备") {
                 EntryRow(
                     title = "设备适配",

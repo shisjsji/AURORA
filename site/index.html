@@ -225,6 +225,48 @@
     .copybtn { padding: 8px 16px 8px 8px; font-size: 14px; }
   }
 
+  /* 金标联盟：独立一块，深底衬金属 */
+  .gold {
+    margin: 72px 0 0; padding: 0; border-radius: var(--r-lg); overflow: hidden;
+    background: #101113; color: #f2efe9;
+    display: grid; grid-template-columns: 1fr; align-items: center;
+  }
+  .gold img { width: 100%; height: auto; display: block; }
+  .gold .txt { padding: 28px 26px 32px; }
+  .gold h2 { color: #f7f4ee; margin: 0 0 10px; }
+  .gold p { margin: 0 0 8px; font-size: 16px; color: #b9b6b0; }
+  .gold p:last-child { margin-bottom: 0; }
+  .gold .tag {
+    display: inline-block; margin-bottom: 14px;
+    font-size: 12px; letter-spacing: .12em; color: #d9b779;
+    border: 1px solid rgba(217, 183, 121, .45); border-radius: 999px;
+    padding: 4px 10px;
+  }
+  @media (min-width: 760px) {
+    .gold { grid-template-columns: 380px 1fr; }
+    .gold .txt { padding: 40px 44px; }
+  }
+  /* 金标联盟：独立一块，深底衬金属 */
+  .gold {
+    margin: 72px 0 0; border-radius: var(--r-lg); overflow: hidden;
+    background: #101113; color: #f2efe9;
+    display: grid; grid-template-columns: 1fr; align-items: center;
+  }
+  .gold img { width: 100%; height: auto; display: block; }
+  .gold .txt { padding: 28px 26px 32px; }
+  .gold h2 { color: #f7f4ee; margin: 0 0 10px; }
+  .gold p { margin: 0 0 8px; font-size: 16px; color: #b9b6b0; }
+  .gold p:last-child { margin-bottom: 0; }
+  .gold .tag {
+    display: inline-block; margin-bottom: 14px;
+    font-size: 12px; letter-spacing: .12em; color: #d9b779;
+    border: 1px solid rgba(217, 183, 121, .45); border-radius: 999px;
+    padding: 4px 10px;
+  }
+  @media (min-width: 760px) {
+    .gold { grid-template-columns: 380px 1fr; }
+    .gold .txt { padding: 40px 44px; }
+  }
   footer {
     margin-top: 72px; padding: 24px 0 56px; border-top: 1px solid var(--line);
     font-size: 14px; color: var(--ink2); line-height: 1.8;
@@ -308,6 +350,15 @@
     </div>
   </section>
 
+  <section class="gold">
+    <img src="/img/badge-gold.webp" alt="金标联盟认证" width="900" height="900">
+    <div class="txt">
+      <span class="tag">金标联盟</span>
+      <h2>已完成金标联盟适配</h2>
+      <p>已取得金标认证，并完成联合建模适配。</p>
+      <p>内存占用、界面规范与系统行为等检测项均通过。</p>
+    </div>
+  </section>
   <section>
     <h2>装上去要五步</h2>
     <ol class="steps">
