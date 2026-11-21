@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 六段均衡的字形，也就是 App 内的签名；只落在 66dp 安全区里 -->
+    <path
+        android:pathData="M31,44v16M40,36v30M49,42v16M58,46v14M67,40v22M76,45v14"
+        android:strokeColor="#F2A5B8"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+</vector>
