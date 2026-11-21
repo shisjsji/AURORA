@@ -93,7 +93,7 @@ internal fun AvatarCropPanel(
 
     fun clamp(candidate: Offset, currentScale: Float): Offset {
         if (boxPx <= 0f) return candidate
-        val fit = max(boxPx / source.width, boxPx / source.height)
+        val fit = fitScale(source, boxPx)
         val slackX = (source.width * fit * currentScale - boxPx) / 2f
         val slackY = (source.height * fit * currentScale - boxPx) / 2f
         return Offset(
@@ -174,9 +174,11 @@ internal fun AvatarCropPanel(
  *
  * <p>Returns null when the preview never got a size - there is nothing honest to upload then.
  */
+private fun fitScale(source: Bitmap, boxPx: Float): Float = max(boxPx / source.width, boxPx / source.height)
+
 private fun renderAvatar(source: Bitmap, boxPx: Float, scale: Float, tx: Float, ty: Float): ByteArray? {
     if (boxPx <= 0f) return null
-    val fit = max(boxPx / source.width, boxPx / source.height)
+    val fit = fitScale(source, boxPx)
     val total = fit * scale
     val drawnWidth = source.width * total
     val drawnHeight = source.height * total

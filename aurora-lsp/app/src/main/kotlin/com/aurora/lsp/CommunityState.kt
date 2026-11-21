@@ -261,8 +261,8 @@ class CommunityState(val auth: AuthState) {
         return when (val result = Community.ban(current, accountId, reason)) {
             is Community.Result.Ok -> {
                 error = null
+                // 封禁只改变这个人的状态与 feed 可见性：两次请求就够，不必连刷三张列表。
                 refreshAdminUsers()
-                refreshAdminPresets()
                 refreshFeed()
                 true
             }

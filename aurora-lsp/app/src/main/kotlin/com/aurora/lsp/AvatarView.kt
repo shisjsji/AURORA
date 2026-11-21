@@ -1,6 +1,8 @@
 package com.aurora.lsp
 
+import android.content.Context
 import android.graphics.BitmapFactory
+import com.aurora.audio.lsp.R
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -16,48 +18,83 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import android.util.LruCache
 
 /**
- * Uploaded avatars are a URL, built-in ones are a key.
+ * Uploaded avatars are a URL; everything else is the one built-in picture.
  *
- * <p>`img:<file>` is what the server stores after an upload; anything else names one of the twelve
- * built-in icons. Keeping both in one string means every existing call site can keep passing an
- * avatar around without knowing which kind it has.
+ * <p>`img:<file>` is what the server stores after an upload. An empty value means "never chose
+ * one", which draws the bundled default. There is no icon set to pick from: an account either
+ * uploaded a picture or it did not.
  */
 internal fun avatarImageUrl(avatar: String): String? =
     if (avatar.startsWith("img:")) Community.AVATARS + avatar.removePrefix("img:") else null
 
 /** Small enough to hold in memory: these are 512×512 JPEGs, a few dozen KB each. */
 private val avatarCache = LruCache<String, ImageBitmap>(48)
+/** URLs that failed once and when they may be tried again; a dropped packet is not a dead image. */
+private val avatarRetryAt = HashMap<String, Long>()
+private const val RETRY_AFTER_MS = 30_000L
 
-private suspend fun loadAvatar(url: String): ImageBitmap? = withContext(Dispatchers.IO) {
+private fun cacheFile(context: Context, url: String): File =
+    File(File(context.filesDir, "avatars"), Integer.toHexString(url.hashCode()) + ".img")
+
+private fun decode(bytes: ByteArray): ImageBitmap? {
+    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+    return bitmap.asImageBitmap()
+}
+
+/**
+ * Memory first, then the copy on disk, then the network.
+ *
+ * <p>Without the disk copy every cold start re-downloaded every face in the feed; with it, a
+ * second launch draws instantly and the network only happens once per file name.
+ */
+private suspend fun loadAvatar(context: Context, url: String): ImageBitmap? = withContext(Dispatchers.IO) {
     avatarCache.get(url)?.let { return@withContext it }
+
+    val file = cacheFile(context, url)
+    if (file.isFile) {
+        runCatching { file.readBytes() }.getOrNull()?.let { bytes ->
+            decode(bytes)?.let { image ->
+                avatarCache.put(url, image)
+                return@withContext image
+            }
+        }
+        file.delete()
+    }
+
+    if (System.currentTimeMillis() < (avatarRetryAt[url] ?: 0L)) return@withContext null
+
     try {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 6000
         connection.readTimeout = 10000
         try {
-            connection.inputStream.use { stream ->
-                val bytes = stream.readBytes()
-                val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    ?: return@withContext null
-                val image = decoded.asImageBitmap()
+            val bytes = connection.inputStream.use { it.readBytes() }
+            val image = decode(bytes)
+            if (image != null) {
                 avatarCache.put(url, image)
-                image
+                avatarRetryAt.remove(url)
+                runCatching { file.parentFile?.mkdirs(); file.writeBytes(bytes) }
+            } else {
+                avatarRetryAt[url] = System.currentTimeMillis() + RETRY_AFTER_MS
             }
+            image
         } finally {
             connection.disconnect()
         }
     } catch (t: Throwable) {
+        avatarRetryAt[url] = System.currentTimeMillis() + RETRY_AFTER_MS
         null
     }
 }
@@ -65,23 +102,24 @@ private suspend fun loadAvatar(url: String): ImageBitmap? = withContext(Dispatch
 /**
  * One avatar, round, whatever kind it is.
  *
- * <p>The picture arrives over the network, so there is a fallback path: while it loads - or if it
- * never arrives - the icon for "eq" stands in, which is what every account starts with anyway.
+ * <p>The default is a bundled picture, so a fresh install shows a face before it ever reaches the
+ * network. Only uploaded avatars are fetched, and a failed fetch keeps the default on screen and
+ * retries later instead of showing a hole.
  */
 @Composable
 internal fun AvatarView(avatar: String, size: Dp, highlighted: Boolean = false) {
     val colors = MiuixTheme.colorScheme
-    val tint = if (highlighted) colors.primary else colors.onSurfaceVariantSummary
+    val context = LocalContext.current
     val url = avatarImageUrl(avatar)
     val loaded by produceState<ImageBitmap?>(initialValue = avatarCache.get(url ?: ""), key1 = url) {
-        value = if (url == null) null else loadAvatar(url)
+        value = if (url == null) null else loadAvatar(context, url)
     }
 
     Box(
         Modifier
             .size(size)
             .clip(CircleShape)
-            .background(tint.copy(alpha = 0.10f)),
+            .background(colors.onSurfaceVariantSummary.copy(alpha = 0.10f)),
         contentAlignment = Alignment.Center
     ) {
         val image = loaded
@@ -95,11 +133,13 @@ internal fun AvatarView(avatar: String, size: Dp, highlighted: Boolean = false) 
                     .clip(CircleShape)
             )
         } else {
-            Icon(
-                imageVector = if (url == null) Avatars.icon(avatar) else Avatars.icon("eq"),
+            Image(
+                painter = painterResource(R.drawable.default_avatar),
                 contentDescription = null,
-                tint = tint,
-                modifier = Modifier.size(size * 0.56f)
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
             )
         }
     }

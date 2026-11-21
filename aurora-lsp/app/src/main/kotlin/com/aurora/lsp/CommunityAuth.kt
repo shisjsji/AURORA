@@ -222,10 +222,6 @@ internal fun AccountPanel(
     val accent = colors.primary
 
     var nickname by remember(auth.nickname) { mutableStateOf(auth.nickname) }
-    var chosen by remember(auth.avatar) { mutableStateOf(auth.avatar) }
-    // Only send an avatar when a built-in icon was actually tapped: an uploaded one is stored as
-    // "img:<file>", which the server refuses to accept back as an icon key.
-    var avatarTouched by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
     var confirmingDelete by remember { mutableStateOf(false) }
@@ -276,7 +272,7 @@ internal fun AccountPanel(
                 onClick = {
                     scope.launch {
                         busy = true
-                        note = if (auth.updateProfile(nickname.trim(), if (avatarTouched) chosen else null)) {
+                        note = if (auth.updateProfile(nickname.trim(), null)) {
                             community.refreshFeed()
                             "已保存。"
                         } else {
@@ -338,38 +334,25 @@ internal fun AccountPanel(
                 }
                 Text("更换", fontSize = 12.sp, color = if (busy) muted else accent)
             }
-            Spacer(Modifier.height(16.dp))
-            Text("或者用内置图标", fontSize = 11.sp, color = muted)
-            Spacer(Modifier.height(8.dp))
-            Avatars.ALL.chunked(6).forEachIndexed { rowIndex, row ->
-                if (rowIndex > 0) Spacer(Modifier.height(10.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    row.forEach { choice ->
-                        val selected = choice.key == chosen
-                        Box(
-                            Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (selected) accent.copy(alpha = 0.18f)
-                                    else colors.surfaceContainer
-                                )
-                                .clickable {
-                                    chosen = choice.key
-                                    avatarTouched = true
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                choice.icon,
-                                null,
-                                tint = if (selected) accent else muted,
-                                modifier = Modifier.size(22.dp)
-                            )
+            if (avatarImageUrl(auth.avatar) != null) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "恢复默认头像",
+                    fontSize = 12.sp,
+                    color = if (busy) muted else accent,
+                    modifier = Modifier
+                        .clickable(enabled = !busy) {
+                            scope.launch {
+                                busy = true
+                                note = if (auth.updateProfile(auth.nickname, "")) {
+                                    "已恢复默认头像"
+                                } else auth.error
+                                busy = false
+                                community.refreshFeed()
+                            }
                         }
-                    }
-                    repeat(6 - row.size) { Spacer(Modifier.size(44.dp)) }
-                }
+                        .padding(vertical = 4.dp)
+                )
             }
         }
 

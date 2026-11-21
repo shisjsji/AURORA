@@ -41,8 +41,6 @@ object Community {
         val mine: Boolean,
         /** Account that published it, 0 when the payload did not carry one. */
         val authorId: Int,
-        /** True when the author is banned (admins see this; their content is hidden from the feed). */
-        val authorBanned: Boolean,
         val createdAt: Long
     )
 
@@ -62,8 +60,7 @@ object Community {
         val nickname: String,
         val avatar: String,
         val email: String,
-        val role: String = "user",
-        val banned: Boolean = false
+        val role: String = "user"
     )
 
     data class Session(val token: String, val profile: Profile)
@@ -129,10 +126,9 @@ object Community {
 
     private fun parseProfile(json: JSONObject?): Profile = Profile(
         nickname = json?.optString("nickname").orEmpty(),
-        avatar = json?.optString("avatar").orEmpty().ifBlank { "eq" },
+        avatar = json?.optString("avatar").orEmpty(),
         email = json?.optString("email").orEmpty(),
-        role = json?.optString("role").orEmpty().ifBlank { "user" },
-        banned = json?.optBoolean("banned") ?: false
+        role = json?.optString("role").orEmpty().ifBlank { "user" }
     )
 
     private fun parseItem(json: JSONObject): Item? {
@@ -155,8 +151,7 @@ object Community {
             liked = json.optBoolean("liked"),
             mine = json.optBoolean("mine"),
             authorId = json.optInt("authorId"),
-            authorBanned = json.optBoolean("authorBanned"),
-            createdAt = json.optLong("createdAt")
+                createdAt = json.optLong("createdAt")
         )
     }
 

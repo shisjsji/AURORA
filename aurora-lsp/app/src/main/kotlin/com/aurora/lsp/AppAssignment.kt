@@ -368,7 +368,7 @@ private fun ChoiceRow(
 
 internal fun presetLabel(id: String?, state: AuroraState): String {
     if (id == null) return "跟随全局预设"
-    if (Presets.isBuiltIn(id)) return Presets.NAMES[Presets.indexOf(id)]
+    if (Presets.hasKey(id)) return Presets.NAMES[Presets.indexOf(id)]
     return state.userPresets.firstOrNull { it.id == id }?.name ?: "预设已删除"
 }
 

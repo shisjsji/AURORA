@@ -565,7 +565,7 @@ public final class AuroraEngine {
         if (assigned != null) {
             float[] saved = config.userPresets.get(assigned);
             if (saved != null) return saved;
-            if (Presets.isBuiltIn(assigned)) return Presets.curve(Presets.indexOf(assigned));
+            if (Presets.hasKey(assigned)) return Presets.curve(Presets.indexOf(assigned));
         }
         if (config.userCurve != null) return config.userCurve;
         return Presets.curve(Presets.indexOf(config.preset));

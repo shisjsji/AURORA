@@ -23,7 +23,7 @@ const PORT = Number(process.env.AURORA_COMMUNITY_PORT || 5003);
 const HOST = '127.0.0.1';
 const DATA_DIR = process.env.AURORA_COMMUNITY_DATA || path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'community.db');
-const TOKEN_FILE = path.join(__dirname, 'admin-token');
+
 const MAIL_FILE = process.env.AURORA_COMMUNITY_MAIL || path.join(__dirname, 'mail.json');
 const MAIL_STDOUT = process.env.AURORA_COMMUNITY_MAIL_STDOUT === '1';
 const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
@@ -43,11 +43,6 @@ const CODE_TRIES = 5;
 const CODE_PER_DAY = 10;
 const SESSION_DAYS = 90;
 const NICKNAME_MAX = 16;
-/** 客户端 Avatars.ALL 的 key，别让公开接口变成任意字符串的存储。 */
-const AVATARS = new Set([
-  'eq', 'music', 'mic', 'album', 'play', 'playlist',
-  'recording', 'notes', 'favorites', 'community', 'layers', 'theme',
-]);
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
@@ -59,7 +54,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   anon_id TEXT UNIQUE NOT NULL,
   recovery_key TEXT UNIQUE NOT NULL,
   nickname TEXT NOT NULL DEFAULT '',
-  avatar TEXT NOT NULL DEFAULT 'eq',
+  avatar TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS presets (
@@ -128,16 +123,11 @@ addColumn('accounts', 'email_verified_at', 'INTEGER');
 addColumn('accounts', 'role', "TEXT NOT NULL DEFAULT 'user'");
 addColumn('accounts', 'banned_at', 'INTEGER');
 addColumn('accounts', 'ban_reason', "TEXT NOT NULL DEFAULT ''");
+// 头像只有两种：上传过的（img:*）和用内置默认（空）。老库里残留的图标 key 一律归空。
+db.exec("UPDATE accounts SET avatar = '' WHERE avatar <> '' AND avatar NOT LIKE 'img:%'");
 // 老账号没有邮箱，所以唯一索引必须是 partial，否则多个 NULL 也不允许重复。
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email) WHERE email IS NOT NULL');
 
-const adminToken = (() => {
-  try {
-    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-  } catch (e) {
-    return '';
-  }
-})();
 
 /** 验证码用 HMAC 存：库泄漏也拿不到能用的 6 位数字。 */
 const codeSecret = (() => {
@@ -484,7 +474,7 @@ function createAccount(email) {
     'acct-' + crypto.randomBytes(8).toString('hex'),
     newRecoveryKey(),
     defaultNickname(),
-    'eq',
+    '',
     now,
     email,
     now
@@ -729,7 +719,7 @@ function handle(req, res, route, url, body) {
       if (body.nickname !== undefined && !nickname) {
         return reply(res, 400, { ok: false, error: 'badNickname' });
       }
-      if (body.avatar !== undefined && !AVATARS.has(avatar)) {
+      if (body.avatar !== undefined && avatar !== '') {
         return reply(res, 400, { ok: false, error: 'badAvatar' });
       }
       db.prepare('UPDATE accounts SET nickname = COALESCE(?, nickname), avatar = COALESCE(?, avatar) WHERE id = ?')
@@ -1060,23 +1050,7 @@ function handle(req, res, route, url, body) {
     return reply(res, 200, { ok: true });
   }
 
-  // ---- 管理（带 admin-token 的运维接口，与账号角色无关） ----
-  if (req.method === 'POST' && route === '/admin/hide') {
-    if (!adminToken || body.token !== adminToken) {
-      return reply(res, 403, { ok: false, error: 'forbidden' });
-    }
-    const type = body.type;
-    const id = Number(body.id);
-    if (type === 'preset') {
-      db.prepare('UPDATE presets SET hidden = 1 WHERE id = ?').run(id);
-    } else if (type === 'comment') {
-      db.prepare('UPDATE comments SET hidden = 1 WHERE id = ?').run(id);
-    } else {
-      return reply(res, 400, { ok: false, error: 'type must be preset or comment' });
-    }
-    return reply(res, 200, { ok: true });
-  }
-
+  // 只有一个管理入口：账号角色。软删（hidden）那套与硬删语义重叠，已移除。
   return reply(res, 404, { ok: false, error: 'not found' });
 }
 

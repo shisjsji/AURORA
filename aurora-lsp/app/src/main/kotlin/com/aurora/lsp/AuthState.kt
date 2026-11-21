@@ -23,7 +23,7 @@ class AuthState(private val prefs: SharedPreferences) {
         private set
     var nickname by mutableStateOf(prefs.getString(KEY_NICKNAME, "").orEmpty())
         private set
-    var avatar by mutableStateOf(prefs.getString(KEY_AVATAR, "eq").orEmpty().ifBlank { "eq" })
+    var avatar by mutableStateOf(prefs.getString(KEY_AVATAR, "").orEmpty())
         private set
 
     /** "admin" unlocks moderation; everything else behaves the same. */
@@ -204,7 +204,7 @@ class AuthState(private val prefs: SharedPreferences) {
         token = null
         email = ""
         nickname = ""
-        avatar = "eq"
+        avatar = ""
         prefs.edit()
             .remove(KEY_TOKEN)
             .remove(KEY_EMAIL)

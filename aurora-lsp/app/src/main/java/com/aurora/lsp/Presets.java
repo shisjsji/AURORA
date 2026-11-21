@@ -79,11 +79,4 @@ public final class Presets {
         int safe = Math.max(0, Math.min(CURVES.length - 1, index));
         return CURVES[safe];
     }
-
-    /** True when the key names one of the built-in presets. */
-    public static boolean isBuiltIn(String key) {
-        if (key == null) return false;
-        for (String known : KEYS) if (known.equals(key)) return true;
-        return false;
-    }
 }
