@@ -203,6 +203,119 @@ class CommunityState(val auth: AuthState) {
         }
     }
 
+    /** Deletes one comment. Allowed for its author and for admins; the server decides. */
+    suspend fun deleteComment(comment: Community.Comment): Boolean {
+        val current = token ?: return false
+        return when (val result = Community.deleteComment(current, comment.id)) {
+            is Community.Result.Ok -> true
+            is Community.Result.Denied -> {
+                error = result.message ?: "删除失败（" + result.code + "）。"
+                false
+            }
+            is Community.Result.Failed -> {
+                error = "连不上社区服务器，删除没完成。"
+                false
+            }
+        }
+    }
+
+    // ---- 管理 ----
+
+    var adminUsers by mutableStateOf<List<Community.AdminUser>>(emptyList())
+        private set
+    var adminUsersStatus by mutableStateOf(FeedStatus.Idle)
+        private set
+    var adminPresets by mutableStateOf<List<Community.Item>>(emptyList())
+        private set
+    var adminPresetsStatus by mutableStateOf(FeedStatus.Idle)
+        private set
+
+    suspend fun refreshAdminUsers(query: String = "") {
+        val current = token ?: return
+        adminUsersStatus = FeedStatus.Loading
+        when (val result = Community.adminUsers(current, query)) {
+            is Community.Result.Ok -> {
+                adminUsers = result.value
+                adminUsersStatus = if (result.value.isEmpty()) FeedStatus.Empty else FeedStatus.Ready
+            }
+            is Community.Result.Denied -> adminUsersStatus = FeedStatus.Offline
+            is Community.Result.Failed -> adminUsersStatus = FeedStatus.Offline
+        }
+    }
+
+    suspend fun refreshAdminPresets() {
+        val current = token ?: return
+        adminPresetsStatus = FeedStatus.Loading
+        when (val result = Community.adminPresets(current)) {
+            is Community.Result.Ok -> {
+                adminPresets = result.value
+                adminPresetsStatus = if (result.value.isEmpty()) FeedStatus.Empty else FeedStatus.Ready
+            }
+            is Community.Result.Denied -> adminPresetsStatus = FeedStatus.Offline
+            is Community.Result.Failed -> adminPresetsStatus = FeedStatus.Offline
+        }
+    }
+
+    suspend fun banUser(accountId: Int, reason: String): Boolean {
+        val current = token ?: return false
+        return when (val result = Community.ban(current, accountId, reason)) {
+            is Community.Result.Ok -> {
+                error = null
+                refreshAdminUsers()
+                refreshAdminPresets()
+                refreshFeed()
+                true
+            }
+            is Community.Result.Denied -> {
+                error = result.message ?: "封禁失败（" + result.code + "）。"
+                false
+            }
+            is Community.Result.Failed -> {
+                error = "连不上社区服务器，封禁没完成。"
+                false
+            }
+        }
+    }
+
+    suspend fun unbanUser(accountId: Int): Boolean {
+        val current = token ?: return false
+        return when (val result = Community.unban(current, accountId)) {
+            is Community.Result.Ok -> {
+                error = null
+                refreshAdminUsers()
+                refreshFeed()
+                true
+            }
+            is Community.Result.Denied -> {
+                error = result.message ?: "解封失败（" + result.code + "）。"
+                false
+            }
+            is Community.Result.Failed -> {
+                error = "连不上社区服务器，解封没完成。"
+                false
+            }
+        }
+    }
+
+    suspend fun setRole(accountId: Int, role: String): Boolean {
+        val current = token ?: return false
+        return when (val result = Community.setRole(current, accountId, role)) {
+            is Community.Result.Ok -> {
+                error = null
+                refreshAdminUsers()
+                true
+            }
+            is Community.Result.Denied -> {
+                error = result.message ?: "改角色失败（" + result.code + "）。"
+                false
+            }
+            is Community.Result.Failed -> {
+                error = "连不上社区服务器，角色没改。"
+                false
+            }
+        }
+    }
+
     /** After signing in or out: whatever the feed said about ownership is no longer true. */
     fun resetForAuthChange() {
         feed = emptyList()

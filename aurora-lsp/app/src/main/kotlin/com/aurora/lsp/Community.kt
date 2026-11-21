@@ -18,6 +18,9 @@ object Community {
 
     const val BASE = "https://lingluandf.online/community"
 
+    /** Uploaded avatars are served from here; the stored value is "img:<file>". */
+    const val AVATARS = BASE + "/avatars/"
+
     data class Item(
         val id: Int,
         val name: String,
@@ -36,6 +39,10 @@ object Community {
         val liked: Boolean,
         /** True when this is the viewer's own preset. Always false while logged out. */
         val mine: Boolean,
+        /** Account that published it, 0 when the payload did not carry one. */
+        val authorId: Int,
+        /** True when the author is banned (admins see this; their content is hidden from the feed). */
+        val authorBanned: Boolean,
         val createdAt: Long
     )
 
@@ -44,12 +51,20 @@ object Community {
         val body: String,
         val nickname: String,
         val avatar: String,
+        val authorId: Int,
+        val mine: Boolean,
         val createdAt: Long
     )
 
     data class Feed(val items: List<Item>, val nextCursor: Int?)
 
-    data class Profile(val nickname: String, val avatar: String, val email: String)
+    data class Profile(
+        val nickname: String,
+        val avatar: String,
+        val email: String,
+        val role: String = "user",
+        val banned: Boolean = false
+    )
 
     data class Session(val token: String, val profile: Profile)
 
@@ -115,7 +130,9 @@ object Community {
     private fun parseProfile(json: JSONObject?): Profile = Profile(
         nickname = json?.optString("nickname").orEmpty(),
         avatar = json?.optString("avatar").orEmpty().ifBlank { "eq" },
-        email = json?.optString("email").orEmpty()
+        email = json?.optString("email").orEmpty(),
+        role = json?.optString("role").orEmpty().ifBlank { "user" },
+        banned = json?.optBoolean("banned") ?: false
     )
 
     private fun parseItem(json: JSONObject): Item? {
@@ -137,6 +154,8 @@ object Community {
             comments = json.optInt("comments"),
             liked = json.optBoolean("liked"),
             mine = json.optBoolean("mine"),
+            authorId = json.optInt("authorId"),
+            authorBanned = json.optBoolean("authorBanned"),
             createdAt = json.optLong("createdAt")
         )
     }
@@ -234,6 +253,8 @@ object Community {
                                     c.optString("body"),
                                     c.optString("nickname"),
                                     c.optString("avatar"),
+                                    c.optInt("authorId"),
+                                    c.optBoolean("mine"),
                                     c.optLong("createdAt")
                                 )
                             }
@@ -280,6 +301,100 @@ object Community {
     suspend fun comment(id: Int, token: String, body: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             call("/presets/$id/comments", "POST", JSONObject().put("body", body), token).map { }
+        }
+
+    /** Uploads one already-cropped 512×512 JPEG. Returns the stored avatar key ("img:<file>"). */
+    suspend fun uploadAvatar(token: String, jpeg: ByteArray): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val connection = URL(BASE + "/me/avatar").openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 8000
+            connection.readTimeout = 25000
+            connection.doOutput = true
+            connection.setRequestProperty("User-Agent", "AURORA-Android")
+            connection.setRequestProperty("Content-Type", "image/jpeg")
+            connection.setRequestProperty("Authorization", "Bearer " + token)
+            connection.outputStream.use { it.write(jpeg) }
+            try {
+                val code = connection.responseCode
+                if (code !in 200..299) {
+                    Result.Denied(code, message = "头像上传失败（" + code + "）。")
+                } else {
+                    val text = connection.inputStream.bufferedReader().use { it.readText() }
+                    Result.Ok(JSONObject(text).optString("avatar"))
+                }
+            } finally {
+                connection.disconnect()
+            }
+        } catch (t: Throwable) {
+            Result.Failed(t.javaClass.simpleName)
+        }
+    }
+
+    suspend fun deleteComment(token: String, id: Int): Result<Unit> = withContext(Dispatchers.IO) {
+        call("/comments/$id", "DELETE", null, token).map { }
+    }
+
+    // ---- 管理 ----
+
+    data class AdminUser(
+        val id: Int,
+        val email: String,
+        val nickname: String,
+        val avatar: String,
+        val role: String,
+        val banned: Boolean,
+        val banReason: String,
+        val presets: Int,
+        val comments: Int
+    )
+
+    suspend fun adminUsers(token: String, query: String): Result<List<AdminUser>> =
+        withContext(Dispatchers.IO) {
+            val suffix = if (query.isBlank()) "" else "?q=" + java.net.URLEncoder.encode(query, "UTF-8")
+            call("/admin/users" + suffix, token = token).map { json ->
+                val array = json.optJSONArray("items") ?: JSONArray()
+                (0 until array.length()).mapNotNull { index ->
+                    val row = array.optJSONObject(index) ?: return@mapNotNull null
+                    AdminUser(
+                        id = row.optInt("id"),
+                        email = row.optString("email"),
+                        nickname = row.optString("nickname"),
+                        avatar = row.optString("avatar"),
+                        role = row.optString("role"),
+                        banned = row.optBoolean("banned"),
+                        banReason = row.optString("banReason"),
+                        presets = row.optInt("presets"),
+                        comments = row.optInt("comments")
+                    )
+                }
+            }
+        }
+
+    /** Every published preset, including the ones hidden from the feed. */
+    suspend fun adminPresets(token: String): Result<List<Item>> = withContext(Dispatchers.IO) {
+        call("/admin/presets", token = token).map { json ->
+            val array = json.optJSONArray("items") ?: JSONArray()
+            (0 until array.length()).mapNotNull { index ->
+                array.optJSONObject(index)?.let(::parseItem)
+            }
+        }
+    }
+
+    suspend fun ban(token: String, accountId: Int, reason: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val payload = JSONObject().put("accountId", accountId).put("reason", reason)
+            call("/admin/ban", "POST", payload, token).map { }
+        }
+
+    suspend fun unban(token: String, accountId: Int): Result<Unit> = withContext(Dispatchers.IO) {
+        call("/admin/unban", "POST", JSONObject().put("accountId", accountId), token).map { }
+    }
+
+    suspend fun setRole(token: String, accountId: Int, role: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val payload = JSONObject().put("accountId", accountId).put("role", role)
+            call("/admin/role", "POST", payload, token).map { }
         }
 
     private fun <T> Result<JSONObject>.map(transform: (JSONObject) -> T): Result<T> =

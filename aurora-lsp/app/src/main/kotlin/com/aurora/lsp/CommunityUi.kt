@@ -29,25 +29,10 @@ import top.yukonga.miuix.kmp.icon.extended.FavoritesFill
 import top.yukonga.miuix.kmp.icon.extended.Messages
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-/** Round identity mark for one avatar key. Quiet by default: the accent stays for selection. */
+/** Round identity mark for one avatar key or uploaded picture. */
 @Composable
 internal fun AvatarBadge(avatar: String, size: Dp = 28.dp, highlighted: Boolean = false) {
-    val colors = MiuixTheme.colorScheme
-    val tint = if (highlighted) colors.primary else colors.onSurfaceVariantSummary
-    Box(
-        Modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(tint.copy(alpha = 0.10f)),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            imageVector = Avatars.icon(avatar),
-            contentDescription = null,
-            tint = tint,
-            modifier = Modifier.size(size * 0.56f)
-        )
-    }
+    AvatarView(avatar, size, highlighted)
 }
 
 /**

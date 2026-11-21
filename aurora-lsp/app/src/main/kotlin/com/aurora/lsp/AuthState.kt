@@ -26,6 +26,12 @@ class AuthState(private val prefs: SharedPreferences) {
     var avatar by mutableStateOf(prefs.getString(KEY_AVATAR, "eq").orEmpty().ifBlank { "eq" })
         private set
 
+    /** "admin" unlocks moderation; everything else behaves the same. */
+    var role by mutableStateOf(prefs.getString(KEY_ROLE, "user").orEmpty().ifBlank { "user" })
+        private set
+
+    val isAdmin: Boolean get() = role == "admin"
+
     var error by mutableStateOf<String?>(null)
         private set
 
@@ -102,6 +108,7 @@ class AuthState(private val prefs: SharedPreferences) {
                 nickname = result.value.nickname.ifBlank { nickname }
                 avatar = result.value.avatar.ifBlank { avatar }
                 email = result.value.email.ifBlank { email }
+                role = result.value.role
                 persist()
             }
             is Community.Result.Denied -> if (result.code == 401) clear()
@@ -135,6 +142,30 @@ class AuthState(private val prefs: SharedPreferences) {
         clear()
     }
 
+    /**
+     * Sends a picture the user already cropped. The server stores it and answers with the key the
+     * account now uses, so the new avatar shows up here without a full profile round trip.
+     */
+    suspend fun uploadAvatar(jpeg: ByteArray): Boolean {
+        val current = token ?: return false
+        return when (val result = Community.uploadAvatar(current, jpeg)) {
+            is Community.Result.Ok -> {
+                avatar = result.value
+                persist()
+                error = null
+                true
+            }
+            is Community.Result.Denied -> {
+                error = result.message ?: "头像没传上去（" + result.code + "）。"
+                false
+            }
+            is Community.Result.Failed -> {
+                error = "连不上社区服务器，头像没传上去。"
+                false
+            }
+        }
+    }
+
     suspend fun deleteAccount(): Boolean {
         val current = token ?: return false
         return when (val result = Community.deleteAccount(current)) {
@@ -163,6 +194,7 @@ class AuthState(private val prefs: SharedPreferences) {
         email = session.profile.email
         nickname = session.profile.nickname
         avatar = session.profile.avatar
+        role = session.profile.role
         persist()
     }
 
@@ -176,6 +208,7 @@ class AuthState(private val prefs: SharedPreferences) {
             .remove(KEY_EMAIL)
             .remove(KEY_NICKNAME)
             .remove(KEY_AVATAR)
+            .remove(KEY_ROLE)
             .apply()
     }
 
@@ -185,6 +218,7 @@ class AuthState(private val prefs: SharedPreferences) {
             .putString(KEY_EMAIL, email)
             .putString(KEY_NICKNAME, nickname)
             .putString(KEY_AVATAR, avatar)
+            .putString(KEY_ROLE, role)
             .apply()
     }
 
@@ -205,6 +239,7 @@ class AuthState(private val prefs: SharedPreferences) {
         private const val KEY_EMAIL = "community_email"
         private const val KEY_NICKNAME = "community_nickname"
         private const val KEY_AVATAR = "community_avatar"
+        private const val KEY_ROLE = "community_role"
         private const val KEY_ANON = "anonId"
     }
 }

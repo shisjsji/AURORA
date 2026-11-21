@@ -173,6 +173,12 @@ private fun AuroraApp() {
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
 
+    // Role and avatar live on the server, so one refresh at launch keeps the account header honest:
+    // an account promoted to admin should show its tools without having to visit the community tab.
+    LaunchedEffect(Unit) {
+        if (auth.loggedIn) auth.refresh()
+    }
+
     val version = remember { installedVersion(context) }
     var pendingUpdate by remember { mutableStateOf<Update.Release?>(null) }
     var updateChecking by remember { mutableStateOf(false) }
@@ -215,6 +221,7 @@ private fun AuroraApp() {
     var showMyLikes by remember { mutableStateOf(false) }
     var showLogin by remember { mutableStateOf(false) }
     var showMyPosts by remember { mutableStateOf(false) }
+    var showAdmin by remember { mutableStateOf(false) }
     // The community needs an account now, so the first launch of a signed-out install says so once.
     // It is a notice, not a wall: dismissing it leaves every other page working untouched.
     var showLoginHint by remember { mutableStateOf(!auth.loggedIn) }
@@ -404,6 +411,10 @@ private fun AuroraApp() {
                                     onOpenAccount = {
                                         if (auth.loggedIn) showIdentity = true else showLogin = true
                                     },
+                                    auth = auth,
+                                    onOpenLogin = { showLogin = true },
+                                    onOpenMyPosts = { showMyPosts = true },
+                                    onOpenAdmin = { showAdmin = true },
                                     checking = updateChecking,
                                     message = updateMessage,
                                     onCheckUpdate = { runUpdateCheck(manual = true) },
@@ -623,6 +634,16 @@ private fun AuroraApp() {
                     },
                     onLater = { showLoginHint = false }
                 )
+            }
+
+            if (showAdmin) {
+                AdminPanel(
+                    auth = auth,
+                    community = community,
+                    scope = scope,
+                    dark = dark,
+                    onOpenDetail = { detailItem = it }
+                ) { showAdmin = false }
             }
 
             if (showMyLikes) {
@@ -1455,6 +1476,10 @@ private fun SettingsPage(
     onOpenDiag: () -> Unit,
     onOpenMyLikes: () -> Unit,
     onOpenAccount: () -> Unit,
+    auth: AuthState,
+    onOpenLogin: () -> Unit,
+    onOpenMyPosts: () -> Unit,
+    onOpenAdmin: () -> Unit,
     checking: Boolean,
     message: String?,
     onCheckUpdate: () -> Unit,
@@ -1469,6 +1494,15 @@ private fun SettingsPage(
         underTitle = { StatusStrip(state, onStatusClick) }
     ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Space.group)) {
+            AccountHeaderCard(
+                auth = auth,
+                dark = dark,
+                onOpenAccount = onOpenAccount,
+                onOpenLogin = onOpenLogin,
+                onOpenMyPosts = onOpenMyPosts,
+                onOpenAdmin = onOpenAdmin
+            )
+
             AuroraGroup("外观") {
                 listOf(
                     "system" to "跟随系统",
@@ -1512,13 +1546,6 @@ private fun SettingsPage(
                     action = "查看",
                     dark = dark,
                     onClick = onOpenMyLikes
-                )
-                RowDivider()
-                EntryRow(
-                    title = "账号",
-                    action = "管理",
-                    dark = dark,
-                    onClick = onOpenAccount
                 )
             }
 

@@ -1,5 +1,9 @@
 package com.aurora.lsp
 
+import android.graphics.Bitmap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -221,8 +226,36 @@ internal fun AccountPanel(
     var busy by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
     var confirmingDelete by remember { mutableStateOf(false) }
+    var cropSource by remember { mutableStateOf<Bitmap?>(null) }
 
     LaunchedEffect(Unit) { auth.clearError() }
+
+    val context = LocalContext.current
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val decoded = decodeForCrop(context, uri)
+            if (decoded == null) note = "这张图读不出来，换一张试试。" else cropSource = decoded
+        }
+    }
+
+    val toCrop = cropSource
+    if (toCrop != null) {
+        AvatarCropPanel(
+            source = toCrop,
+            dark = dark,
+            onCancel = { cropSource = null }
+        ) { jpeg ->
+            scope.launch {
+                busy = true
+                note = if (auth.uploadAvatar(jpeg)) "头像已更新。" else auth.error
+                busy = false
+                cropSource = null
+                community.refreshFeed()
+            }
+        }
+        return
+    }
 
     PanelScaffold(
         dark = dark,
@@ -269,8 +302,41 @@ internal fun AccountPanel(
                     cursorColor = accent
                 )
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
             Text("头像", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = ink)
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(enabled = !busy) {
+                        picker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    }
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AvatarView(auth.avatar, 64.dp, highlighted = true)
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (avatarImageUrl(auth.avatar) != null) "自定义图片" else "内置图标",
+                        fontSize = 13.sp,
+                        color = ink
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        if (busy) "上传中…" else "点这里从相册选一张，裁成圆形",
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        color = muted
+                    )
+                }
+                Text("更换", fontSize = 12.sp, color = if (busy) muted else accent)
+            }
+            Spacer(Modifier.height(16.dp))
+            Text("或者用内置图标", fontSize = 11.sp, color = muted)
             Spacer(Modifier.height(8.dp))
             Avatars.ALL.chunked(6).forEachIndexed { rowIndex, row ->
                 if (rowIndex > 0) Spacer(Modifier.height(10.dp))
@@ -545,9 +611,80 @@ internal fun CommunityLoginHintDialog(onLogin: () -> Unit, onLater: () -> Unit) 
     }
 }
 
+/**
+ * The account, as a header: name on top, avatar in the middle, one line of who you are below.
+ *
+ * <p>It sits at the top of Settings because that is where people look for "my stuff": before this,
+ * the avatar editor was two taps deep inside a panel that also looked like a login form, and nobody
+ * found it. Tapping the avatar or the row goes to the same panel - the picture and the name live
+ * together, so two separate entries would be two doors into one room.
+ */
+@Composable
+internal fun AccountHeaderCard(
+    auth: AuthState,
+    dark: Boolean,
+    onOpenAccount: () -> Unit,
+    onOpenLogin: () -> Unit,
+    onOpenMyPosts: () -> Unit,
+    onOpenAdmin: () -> Unit
+) {
+    val colors = MiuixTheme.colorScheme
+    val ink = colors.onSurface
+    val muted = colors.onSurfaceVariantSummary
+    val signedIn = auth.loggedIn
+
+    AuroraGroup {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clickable { if (signedIn) onOpenAccount() else onOpenLogin() }
+                .padding(vertical = 18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                if (signedIn) auth.nickname.ifBlank { "未命名" } else "未登录",
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Medium,
+                color = ink
+            )
+            Spacer(Modifier.height(10.dp))
+            AvatarView(auth.avatar, 64.dp, highlighted = signedIn)
+            Spacer(Modifier.height(10.dp))
+            Text(
+                if (signedIn) auth.email else "登录后，你发布的曲线和喜欢会跟着账号走",
+                fontSize = 11.sp,
+                color = muted
+            )
+        }
+        RowDivider()
+        AuroraRow(
+            title = if (signedIn) "更换名称与头像" else "邮箱登录",
+            trailing = { ValueText(if (signedIn) "编辑" else "登录", accent = true) },
+            onClick = if (signedIn) onOpenAccount else onOpenLogin
+        )
+        if (signedIn) {
+            RowDivider()
+            AuroraRow(
+                title = "我的发布",
+                trailing = { ValueText("管理") },
+                onClick = onOpenMyPosts
+            )
+        }
+        if (auth.isAdmin) {
+            RowDivider()
+            AuroraRow(
+                title = "社区管理",
+                summary = "封禁账号、删除内容",
+                trailing = { ValueText("进入", accent = true) },
+                onClick = onOpenAdmin
+            )
+        }
+    }
+}
+
 /** Same shell as the update prompt: cancel left, the destructive choice right. */
 @Composable
-private fun ConfirmBox(
+internal fun ConfirmBox(
     title: String,
     body: String,
     confirmLabel: String,

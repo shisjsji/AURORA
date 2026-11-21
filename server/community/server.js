@@ -26,6 +26,9 @@ const DB_FILE = path.join(DATA_DIR, 'community.db');
 const TOKEN_FILE = path.join(__dirname, 'admin-token');
 const MAIL_FILE = process.env.AURORA_COMMUNITY_MAIL || path.join(__dirname, 'mail.json');
 const MAIL_STDOUT = process.env.AURORA_COMMUNITY_MAIL_STDOUT === '1';
+const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
+/** 512 KB 是 512×512 JPEG 的四倍有余，够用且能挡住误传原图。 */
+const AVATAR_MAX = 512 * 1024;
 
 const MAX_BODY = 32 * 1024;
 const WINDOW_MS = 60 * 1000;
@@ -47,6 +50,7 @@ const AVATARS = new Set([
 ]);
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
 const db = new DatabaseSync(DB_FILE);
 
 db.exec(`
@@ -120,6 +124,10 @@ addColumn('presets', 'preset', "TEXT NOT NULL DEFAULT ''");
 addColumn('presets', 'strength', 'INTEGER NOT NULL DEFAULT 100');
 addColumn('accounts', 'email', 'TEXT');
 addColumn('accounts', 'email_verified_at', 'INTEGER');
+/** 'user' or 'admin'. Only an admin may remove other people's content or ban an account. */
+addColumn('accounts', 'role', "TEXT NOT NULL DEFAULT 'user'");
+addColumn('accounts', 'banned_at', 'INTEGER');
+addColumn('accounts', 'ban_reason', "TEXT NOT NULL DEFAULT ''");
 // 老账号没有邮箱，所以唯一索引必须是 partial，否则多个 NULL 也不允许重复。
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email) WHERE email IS NOT NULL');
 
@@ -239,8 +247,38 @@ function profile(account) {
     nickname: account.nickname,
     avatar: account.avatar,
     email: account.email || '',
+    role: account.role || 'user',
+    banned: Boolean(account.banned_at),
     createdAt: account.created_at,
   };
+}
+
+/** A banned account keeps its rows but loses its voice: no sign-in, no writes, content hidden. */
+function isAdmin(account) {
+  return Boolean(account) && account.role === 'admin';
+}
+
+function requireAccount(req, res) {
+  const account = accountFor(req);
+  if (!account) {
+    reply(res, 401, { ok: false, error: 'unauthorized' });
+    return null;
+  }
+  if (account.banned_at) {
+    reply(res, 403, { ok: false, error: 'banned', message: '这个账号已被封禁，不能发布或互动。' });
+    return null;
+  }
+  return account;
+}
+
+function requireAdmin(req, res) {
+  const account = requireAccount(req, res);
+  if (!account) return null;
+  if (!isAdmin(account)) {
+    reply(res, 403, { ok: false, error: 'forbidden', message: '只有管理员能做这件事。' });
+    return null;
+  }
+  return account;
 }
 
 // ---- 发信 ----------------------------------------------------------------
@@ -305,7 +343,13 @@ function smtpSend(cfg, to, subject, body) {
           return;
         }
         const next = steps[index++];
-        if (next === undefined) return;
+        // Past the last step (QUIT already answered): the message was accepted and the server said
+        // goodbye, so this is where the promise resolves. Returning silently here made /auth/code
+        // send the mail and then never answer the request at all.
+        if (next === undefined) {
+          finish(null);
+          return;
+        }
         socket.write(next + '\r\n');
       }
     });
@@ -396,7 +440,7 @@ function card(row, viewerAccountId, likedKnown) {
 const FEED_SQL = `
 SELECT p.*, a.nickname, a.avatar FROM presets p
 JOIN accounts a ON a.id = p.account_id
-WHERE p.hidden = 0`;
+WHERE p.hidden = 0 AND a.banned_at IS NULL`;
 
 // ---- 账号归属迁移 --------------------------------------------------------
 
@@ -448,6 +492,49 @@ function createAccount(email) {
   return accountById(Number(result.lastInsertRowid));
 }
 
+// ---- 头像 ----------------------------------------------------------------
+
+/** "img:<file>" when the avatar is an uploaded picture, null for the built-in icon keys. */
+function avatarFileOf(avatar) {
+  const match = /^img:([a-f0-9]{4,16}-[a-f0-9]{16}\.(jpg|png))$/.exec(avatar || '');
+  return match ? match[1] : null;
+}
+
+function removeAvatarFile(avatar) {
+  const file = avatarFileOf(avatar);
+  if (!file) return;
+  fs.unlink(path.join(AVATAR_DIR, file), () => {});
+}
+
+/**
+ * Stores one already-cropped square picture as the account's avatar.
+ *
+ * <p>The client sends a 512×512 JPEG it produced itself, so nothing here decodes pixels: the only
+ * gates are the size, the magic bytes, and a filename this function generates (no client string
+ * ever becomes a path).
+ */
+function handleAvatarUpload(req, res, buffer) {
+  const account = requireAccount(req, res);
+  if (!account) return;
+  if (buffer.length < 256) return reply(res, 400, { ok: false, error: 'empty' });
+  if (buffer.length > AVATAR_MAX) return reply(res, 413, { ok: false, error: 'tooLarge' });
+
+  const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const isPng = buffer.length > 8 && buffer.subarray(0, 8).equals(pngMagic);
+  if (!isJpeg && !isPng) return reply(res, 415, { ok: false, error: 'notImage' });
+
+  const ext = isPng ? 'png' : 'jpg';
+  const name = account.id.toString(16).padStart(4, '0') + '-' +
+    crypto.randomBytes(8).toString('hex') + '.' + ext;
+  fs.writeFileSync(path.join(AVATAR_DIR, name), buffer, { mode: 0o644 });
+
+  const previous = account.avatar;
+  db.prepare('UPDATE accounts SET avatar = ? WHERE id = ?').run('img:' + name, account.id);
+  removeAvatarFile(previous);
+  return reply(res, 200, { ok: true, avatar: 'img:' + name });
+}
+
 // ---- HTTP ---------------------------------------------------------------
 
 const server = http.createServer((req, res) => {
@@ -467,9 +554,13 @@ const server = http.createServer((req, res) => {
 
   let size = 0;
   const chunks = [];
+  // 头像上传是二进制，不能走 JSON 解析：先看路由，再决定怎么读体。
+  const rawRoute = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
+  const isAvatarUpload = req.method === 'POST' && rawRoute === '/me/avatar';
+  const bodyLimit = isAvatarUpload ? AVATAR_MAX : MAX_BODY;
   req.on('data', (chunk) => {
     size += chunk.length;
-    if (size > MAX_BODY) {
+    if (size > bodyLimit) {
       res.writeHead(413, { 'Content-Type': 'text/plain' });
       res.end('body too large');
       req.destroy();
@@ -483,6 +574,14 @@ const server = http.createServer((req, res) => {
 
     const url = new URL(req.url || '/', 'http://localhost');
     const route = url.pathname.replace(/\/+$/, '') || '/';
+    if (isAvatarUpload) {
+      try {
+        return handleAvatarUpload(req, res, Buffer.concat(chunks));
+      } catch (e) {
+        console.error('avatar upload failed:', e && e.message);
+        return reply(res, 500, { ok: false, error: 'server error' });
+      }
+    }
     let body = {};
     if (chunks.length > 0) {
       try {
@@ -505,10 +604,33 @@ const server = http.createServer((req, res) => {
 });
 
 function handle(req, res, route, url, body) {
+  // ---- 头像文件（公开读，文件名不可猜测） ----
+  const avatarMatch = route.match(/^\/avatars\/([a-f0-9]{4,16}-[a-f0-9]{16}\.(jpg|png))$/);
+  if (req.method === 'GET' && avatarMatch) {
+    fs.readFile(path.join(AVATAR_DIR, avatarMatch[1]), (error, data) => {
+      if (error) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        return res.end('not found');
+      }
+      res.writeHead(200, {
+        'Content-Type': avatarMatch[2] === 'png' ? 'image/png' : 'image/jpeg',
+        'Content-Length': data.length,
+        'Cache-Control': 'public, max-age=604800',
+      });
+      res.end(data);
+    });
+    return;
+  }
   // ---- 登录：发验证码 ----
   if (req.method === 'POST' && route === '/auth/code') {
     const email = normalizeEmail(body.email);
     if (!email) return reply(res, 400, { ok: false, error: 'badEmail' });
+
+    // 封禁优先于发码：一封“验证码已发出”的邮件只会让被封的人白等。
+    const existing = db.prepare('SELECT * FROM accounts WHERE email = ?').get(email);
+    if (existing && existing.banned_at) {
+      return reply(res, 403, { ok: false, error: 'banned', message: '这个账号已被封禁，暂时不能登录。' });
+    }
 
     const now = Date.now();
     const row = db.prepare('SELECT * FROM codes WHERE email = ?').get(email);
@@ -568,6 +690,9 @@ function handle(req, res, route, url, body) {
     db.prepare('DELETE FROM codes WHERE email = ?').run(email);
 
     let account = db.prepare('SELECT * FROM accounts WHERE email = ?').get(email);
+    if (account && account.banned_at) {
+      return reply(res, 403, { ok: false, error: 'banned', message: '这个账号已被封禁，暂时不能登录。' });
+    }
     const anonId = str(body.anonId, 64);
     if (!account) {
       account = createAccount(email);
@@ -588,8 +713,8 @@ function handle(req, res, route, url, body) {
 
   // ---- 我的资料 ----
   if (route === '/me') {
-    const account = accountFor(req);
-    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
+    const account = requireAccount(req, res);
+    if (!account) return;
 
     if (req.method === 'GET') return reply(res, 200, { ok: true, profile: profile(account) });
 
@@ -604,11 +729,14 @@ function handle(req, res, route, url, body) {
       }
       db.prepare('UPDATE accounts SET nickname = COALESCE(?, nickname), avatar = COALESCE(?, avatar) WHERE id = ?')
         .run(nickname ?? null, body.avatar === undefined ? null : avatar, account.id);
+      // 换回内置图标时，上一张上传的图就不再被引用，顺手删掉，别把磁盘当回收站。
+      if (body.avatar !== undefined) removeAvatarFile(account.avatar);
       return reply(res, 200, { ok: true, profile: profile(accountById(account.id)) });
     }
 
     if (req.method === 'DELETE') {
       // 注销：内容和喜欢一起删，邮箱立刻可以重新注册成一个空账号。
+      const avatarToDrop = account.avatar;
       db.exec('BEGIN');
       try {
         db.prepare('DELETE FROM likes WHERE account_id = ?').run(account.id);
@@ -627,6 +755,7 @@ function handle(req, res, route, url, body) {
         try { db.exec('ROLLBACK'); } catch (e2) { /* nothing to roll back */ }
         return reply(res, 500, { ok: false, error: 'delete failed' });
       }
+      removeAvatarFile(avatarToDrop);
       return reply(res, 200, { ok: true });
     }
     return reply(res, 405, { ok: false, error: 'method not allowed' });
@@ -680,18 +809,23 @@ function handle(req, res, route, url, body) {
     const out = card(row, viewer ? viewer.id : undefined);
     out.commentList = comments.map((c) => ({
       id: c.id, body: c.body, nickname: c.nickname, avatar: c.avatar, createdAt: c.created_at,
+      // 删评论是按人判权限的：作者自己可以删，管理员可以删任何一条。
+      authorId: c.account_id,
+      mine: viewer ? c.account_id === viewer.id : false,
     }));
     return reply(res, 200, { ok: true, item: out });
   }
 
-  // ---- 删除自己的曲线 ----
+  // ---- 删除曲线（作者本人或管理员） ----
   if (req.method === 'DELETE' && detailMatch) {
-    const account = accountFor(req);
-    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
+    const account = requireAccount(req, res);
+    if (!account) return;
     const id = Number(detailMatch[1]);
     const row = db.prepare('SELECT * FROM presets WHERE id = ?').get(id);
     if (!row) return reply(res, 404, { ok: false, error: 'not found' });
-    if (row.account_id !== account.id) return reply(res, 403, { ok: false, error: 'not owner' });
+    if (row.account_id !== account.id && !isAdmin(account)) {
+      return reply(res, 403, { ok: false, error: 'not owner', message: '这条曲线不是你发的。' });
+    }
     db.exec('BEGIN');
     try {
       db.prepare('DELETE FROM comments WHERE preset_id = ?').run(id);
@@ -707,8 +841,8 @@ function handle(req, res, route, url, body) {
 
   // ---- 发布 ----
   if (req.method === 'POST' && route === '/presets') {
-    const account = accountFor(req);
-    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
+    const account = requireAccount(req, res);
+    if (!account) return;
     const name = str(body.name, 20);
     const curve = validCurve(body.curve);
     const model = str(body.model, 64);
@@ -749,8 +883,8 @@ function handle(req, res, route, url, body) {
   // ---- 喜欢 ----
   const likeMatch = route.match(/^\/presets\/(\d+)\/like$/);
   if (likeMatch && (req.method === 'POST' || req.method === 'DELETE')) {
-    const account = accountFor(req);
-    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
+    const account = requireAccount(req, res);
+    if (!account) return;
     const id = Number(likeMatch[1]);
     const preset = db.prepare('SELECT id FROM presets WHERE id = ? AND hidden = 0').get(id);
     if (!preset) return reply(res, 404, { ok: false, error: 'not found' });
@@ -772,8 +906,8 @@ function handle(req, res, route, url, body) {
   // ---- 评论 ----
   const commentMatch = route.match(/^\/presets\/(\d+)\/comments$/);
   if (req.method === 'POST' && commentMatch) {
-    const account = accountFor(req);
-    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
+    const account = requireAccount(req, res);
+    if (!account) return;
     const id = Number(commentMatch[1]);
     const preset = db.prepare('SELECT id FROM presets WHERE id = ? AND hidden = 0').get(id);
     if (!preset) return reply(res, 404, { ok: false, error: 'not found' });
@@ -793,8 +927,8 @@ function handle(req, res, route, url, body) {
 
   // ---- 我的喜欢 ----
   if (req.method === 'GET' && route === '/likes') {
-    const account = accountFor(req);
-    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
+    const account = requireAccount(req, res);
+    if (!account) return;
     const rows = db.prepare(`
       SELECT p.*, a.nickname, a.avatar FROM likes l
       JOIN presets p ON p.id = l.preset_id
@@ -805,6 +939,123 @@ function handle(req, res, route, url, body) {
   }
 
   // ---- 管理 ----
+  if (route === '/admin/presets' && req.method === 'GET') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const cursor = Number(url.searchParams.get('cursor') || '0');
+    const rows = cursor > 0
+      ? db.prepare(
+        'SELECT p.*, a.nickname, a.avatar, a.email, a.banned_at FROM presets p ' +
+        'JOIN accounts a ON a.id = p.account_id WHERE p.id < ? ORDER BY p.id DESC LIMIT ?'
+      ).all(cursor, PAGE_SIZE + 1)
+      : db.prepare(
+        'SELECT p.*, a.nickname, a.avatar, a.email, a.banned_at FROM presets p ' +
+        'JOIN accounts a ON a.id = p.account_id ORDER BY p.id DESC LIMIT ?'
+      ).all(PAGE_SIZE + 1);
+    const page = rows.slice(0, PAGE_SIZE);
+    const nextCursor = rows.length > PAGE_SIZE ? page[page.length - 1].id : null;
+    return reply(res, 200, {
+      ok: true,
+      items: page.map((row) => {
+        const item = card(row, admin.id);
+        item.authorId = row.account_id;
+        item.authorEmail = row.email || '';
+        item.hidden = Boolean(row.hidden);
+        item.authorBanned = Boolean(row.banned_at);
+        return item;
+      }),
+      nextCursor,
+    });
+  }
+
+  if (route === '/admin/users' && req.method === 'GET') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const query = str(url.searchParams.get('q') || '', 64);
+    const rows = query
+      ? db.prepare(
+        'SELECT * FROM accounts WHERE email LIKE ? OR nickname LIKE ? ORDER BY id DESC LIMIT 30'
+      ).all('%' + query + '%', '%' + query + '%')
+      : db.prepare('SELECT * FROM accounts ORDER BY id DESC LIMIT 30').all();
+    return reply(res, 200, {
+      ok: true,
+      items: rows.map((account) => ({
+        id: account.id,
+        email: account.email || '',
+        nickname: account.nickname,
+        avatar: account.avatar,
+        role: account.role || 'user',
+        banned: Boolean(account.banned_at),
+        banReason: account.ban_reason || '',
+        createdAt: account.created_at,
+        presets: db.prepare('SELECT COUNT(*) AS c FROM presets WHERE account_id = ?').get(account.id).c,
+        comments: db.prepare('SELECT COUNT(*) AS c FROM comments WHERE account_id = ?').get(account.id).c,
+      })),
+    });
+  }
+
+  if (route === '/admin/ban' && req.method === 'POST') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const targetId = Number(body.accountId);
+    if (!targetId) return reply(res, 400, { ok: false, error: 'accountId required' });
+    if (targetId === admin.id) return reply(res, 400, { ok: false, error: 'self' });
+    const target = accountById(targetId);
+    if (!target) return reply(res, 404, { ok: false, error: 'not found' });
+    if (isAdmin(target)) {
+      return reply(res, 400, { ok: false, error: 'admin', message: '先取消对方的管理员身份，再封禁。' });
+    }
+    const reason = str(body.reason, 80) || '';
+    db.prepare('UPDATE accounts SET banned_at = ?, ban_reason = ? WHERE id = ?')
+      .run(Date.now(), reason, targetId);
+    // 封禁后现有登录立即失效，内容通过 FEED_SQL 一并下架。
+    db.prepare('DELETE FROM sessions WHERE account_id = ?').run(targetId);
+    return reply(res, 200, { ok: true });
+  }
+
+  if (route === '/admin/unban' && req.method === 'POST') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const targetId = Number(body.accountId);
+    if (!targetId) return reply(res, 400, { ok: false, error: 'accountId required' });
+    db.prepare("UPDATE accounts SET banned_at = NULL, ban_reason = '' WHERE id = ?").run(targetId);
+    return reply(res, 200, { ok: true });
+  }
+
+  if (route === '/admin/role' && req.method === 'POST') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const targetId = Number(body.accountId);
+    const role = body.role === 'admin' ? 'admin' : body.role === 'user' ? 'user' : null;
+    if (!targetId || !role) return reply(res, 400, { ok: false, error: 'bad request' });
+    // 把自己降级会把自己锁在门外，这类误操作直接拒绝。
+    if (targetId === admin.id && role === 'user') {
+      return reply(res, 400, { ok: false, error: 'self', message: '不能取消自己的管理员身份。' });
+    }
+    const target = accountById(targetId);
+    if (!target) return reply(res, 404, { ok: false, error: 'not found' });
+    db.prepare('UPDATE accounts SET role = ? WHERE id = ?').run(role, targetId);
+    return reply(res, 200, { ok: true });
+  }
+
+  // ---- 删除评论（作者本人或管理员） ----
+  const commentIdMatch = route.match(/^\/comments\/(\d+)$/);
+  if (req.method === 'DELETE' && commentIdMatch) {
+    const account = requireAccount(req, res);
+    if (!account) return;
+    const commentId = Number(commentIdMatch[1]);
+    const row = db.prepare('SELECT * FROM comments WHERE id = ?').get(commentId);
+    if (!row) return reply(res, 404, { ok: false, error: 'not found' });
+    if (row.account_id !== account.id && !isAdmin(account)) {
+      return reply(res, 403, { ok: false, error: 'not owner' });
+    }
+    db.prepare('DELETE FROM comments WHERE id = ?').run(commentId);
+    db.prepare('UPDATE presets SET comment_count = MAX(comment_count - 1, 0) WHERE id = ?')
+      .run(row.preset_id);
+    return reply(res, 200, { ok: true });
+  }
+
+  // ---- 管理（带 admin-token 的运维接口，与账号角色无关） ----
   if (req.method === 'POST' && route === '/admin/hide') {
     if (!adminToken || body.token !== adminToken) {
       return reply(res, 403, { ok: false, error: 'forbidden' });

@@ -154,11 +154,11 @@ internal fun CommunityDetailPanel(
             }
         }
 
-        if (current.mine) {
+        if (current.mine || community.auth.isAdmin) {
             PanelCard(dark) {
                 if (!confirmingDelete) {
                     Text(
-                        "删除这条曲线",
+                        if (current.mine) "删除这条曲线" else "删除这条曲线（管理）",
                         fontSize = 13.sp,
                         color = colors.error,
                         modifier = Modifier
@@ -224,7 +224,30 @@ internal fun CommunityDetailPanel(
                         AvatarBadge(comment.avatar, 22.dp)
                         Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(comment.nickname, fontSize = 11.sp, color = muted)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(comment.nickname, fontSize = 11.sp, color = muted)
+                                if (comment.mine || community.auth.isAdmin) {
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        "删除",
+                                        fontSize = 11.sp,
+                                        color = colors.error,
+                                        modifier = Modifier
+                                            .clickable {
+                                                scope.launch {
+                                                    if (community.deleteComment(comment)) {
+                                                        val refreshed = Community.detail(current.id, community.token)
+                                                        if (refreshed is Community.Result.Ok) {
+                                                            current = refreshed.value.first
+                                                            comments = refreshed.value.second
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            .padding(vertical = 2.dp, horizontal = 2.dp)
+                                    )
+                                }
+                            }
                             Spacer(Modifier.height(2.dp))
                             Text(comment.body, fontSize = 13.sp, lineHeight = 19.sp, color = ink)
                         }
