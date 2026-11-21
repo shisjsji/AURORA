@@ -320,7 +320,7 @@ internal fun AccountPanel(
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
-                        if (avatarImageUrl(auth.avatar) != null) "自定义图片" else "内置图标",
+                        if (avatarImageUrl(auth.avatar) != null) "自定义图片" else "默认头像",
                         fontSize = 13.sp,
                         color = ink
                     )
