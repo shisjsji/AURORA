@@ -43,6 +43,8 @@ internal fun CommunityDetailPanel(
     state: AuroraState,
     dark: Boolean,
     scope: CoroutineScope,
+    onNeedLogin: () -> Unit,
+    onDeleted: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val colors = MiuixTheme.colorScheme
@@ -56,9 +58,10 @@ internal fun CommunityDetailPanel(
     var saving by remember { mutableStateOf(false) }
     var saveNote by remember { mutableStateOf<String?>(null) }
     var sending by remember { mutableStateOf(false) }
+    var confirmingDelete by remember { mutableStateOf(false) }
 
     LaunchedEffect(item.id) {
-        when (val result = Community.detail(item.id, community.anonId)) {
+        when (val result = Community.detail(item.id, community.token)) {
             is Community.Result.Ok -> {
                 current = result.value.first
                 comments = result.value.second
@@ -80,12 +83,16 @@ internal fun CommunityDetailPanel(
                 primary = false,
                 modifier = Modifier.weight(1f),
                 onClick = {
-                    scope.launch {
-                        if (community.toggleLike(current)) {
-                            current = current.copy(
-                                liked = !current.liked,
-                                likes = (current.likes + if (!current.liked) 1 else -1).coerceAtLeast(0)
-                            )
+                    if (!community.auth.loggedIn) {
+                        onNeedLogin()
+                    } else {
+                        scope.launch {
+                            if (community.toggleLike(current)) {
+                                current = current.copy(
+                                    liked = !current.liked,
+                                    likes = (current.likes + if (!current.liked) 1 else -1).coerceAtLeast(0)
+                                )
+                            }
                         }
                     }
                 }
@@ -111,12 +118,6 @@ internal fun CommunityDetailPanel(
             )
         }
     ) {
-        // Liking or commenting can be the first thing this install ever does. If that created
-        // the identity, the key is shown right here - the panel may be the only place the user is.
-        community.freshRecoveryKey?.let { key ->
-            RecoveryKeyCard(key, dark) { community.clearFreshKey() }
-        }
-
         PanelCard(dark) {
             CurvePreview(current.curve, accent, muted, showScale = false)
             Spacer(Modifier.height(10.dp))
@@ -150,6 +151,57 @@ internal fun CommunityDetailPanel(
             saveNote?.let { note ->
                 Spacer(Modifier.height(8.dp))
                 Text(note, fontSize = 12.sp, lineHeight = 18.sp, color = accent)
+            }
+        }
+
+        if (current.mine) {
+            PanelCard(dark) {
+                if (!confirmingDelete) {
+                    Text(
+                        "删除这条曲线",
+                        fontSize = 13.sp,
+                        color = colors.error,
+                        modifier = Modifier
+                            .clickable { confirmingDelete = true }
+                            .padding(vertical = 6.dp)
+                    )
+                } else {
+                    Text(
+                        "删除后别人也看不到了，它的评论和喜欢会一起删掉。",
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        color = muted
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Text(
+                            "取消",
+                            fontSize = 13.sp,
+                            color = muted,
+                            modifier = Modifier
+                                .clickable { confirmingDelete = false }
+                                .padding(vertical = 4.dp)
+                        )
+                        Text(
+                            "确认删除",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.error,
+                            modifier = Modifier
+                                .clickable {
+                                    scope.launch {
+                                        if (community.deletePost(current)) {
+                                            onDeleted()
+                                            onDismiss()
+                                        } else {
+                                            confirmingDelete = false
+                                        }
+                                    }
+                                }
+                                .padding(vertical = 4.dp)
+                        )
+                    }
+                }
             }
         }
 
@@ -205,9 +257,13 @@ internal fun CommunityDetailPanel(
             )
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                val sendable = input.isNotBlank() && !sending
+                val sendable = input.isNotBlank() && !sending && community.auth.loggedIn
                 Text(
-                    if (sending) "发送中…" else "发送评论",
+                    when {
+                        sending -> "发送中…"
+                        !community.auth.loggedIn -> "登录后可以评论"
+                        else -> "发送评论"
+                    },
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
                     color = if (sendable) accent else muted,
@@ -218,13 +274,16 @@ internal fun CommunityDetailPanel(
                                 Modifier.clickable {
                                     scope.launch {
                                         sending = true
-                                        if (community.addComment(current.id, input.trim())) {
-                                            val refreshed = Community.detail(current.id, community.anonId)
+                                        val result = community.addComment(current.id, input.trim())
+                                        if (result is Community.Result.Ok) {
+                                            val refreshed = Community.detail(current.id, community.token)
                                             if (refreshed is Community.Result.Ok) {
                                                 current = refreshed.value.first
                                                 comments = refreshed.value.second
                                             }
                                             input = ""
+                                        } else if (result is Community.Result.Denied && result.code == 401) {
+                                            onNeedLogin()
                                         }
                                         sending = false
                                     }

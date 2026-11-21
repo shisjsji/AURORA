@@ -19,10 +19,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /**
- * The community page: share entry, identity line, and everyone else's curves.
+ * The community page: share entry, account line, and everyone else's curves.
  *
- * <p>It sits where the dock sits, not behind a menu - sharing is the point of the feature, and a
- * browse-only page nobody finds is a page nobody feeds.
+ * <p>Browsing is open to anyone; the moment a tap would create something - publishing, liking,
+ * commenting - the page asks for an account first. Everything that was published stays reachable
+ * under "我的发布", so sharing is a loop rather than a one-way dump.
  */
 @Composable
 internal fun CommunityPage(
@@ -33,18 +34,21 @@ internal fun CommunityPage(
     active: Boolean,
     onOpenShare: () -> Unit,
     onOpenDetail: (Community.Item) -> Unit,
-    onOpenIdentity: () -> Unit,
+    onOpenLogin: () -> Unit,
+    onOpenAccount: () -> Unit,
+    onOpenMyPosts: () -> Unit,
     onStatusClick: () -> Unit
 ) {
     val colors = MiuixTheme.colorScheme
     val muted = colors.onSurfaceVariantSummary
+    val signedIn = community.auth.loggedIn
 
     // All four pages are composed at startup, so fetching here on `Unit` would hit the network on
     // every launch even when nobody opens this tab. Load the first time the tab is actually shown.
     LaunchedEffect(active) {
         if (!active) return@LaunchedEffect
         if (community.feedStatus == CommunityState.FeedStatus.Idle) community.refreshFeed()
-        if (community.nickname.isBlank()) community.refreshProfile()
+        if (signedIn) community.auth.refresh()
     }
 
     AuroraPage(
@@ -53,19 +57,40 @@ internal fun CommunityPage(
     ) {
         AuroraGroup("分享") {
             AuroraRow(
-                title = "分享我的曲线",
-                leading = { Icon(MiuixIcons.UploadCloud, null, tint = MiuixTheme.colorScheme.onSurfaceVariantSummary) },
-                trailing = { ValueText("发布", accent = true) },
-                onClick = onOpenShare
+                title = if (signedIn) "分享我的曲线" else "登录后发布曲线",
+                leading = {
+                    Icon(
+                        MiuixIcons.UploadCloud,
+                        null,
+                        tint = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    )
+                },
+                trailing = { ValueText(if (signedIn) "发布" else "登录", accent = true) },
+                onClick = if (signedIn) onOpenShare else onOpenLogin
             )
             RowDivider()
             AuroraRow(
-                title = community.nickname.ifBlank { "社区身份" },
-                leading = { AvatarBadge(community.avatar, 26.dp) },
-                trailing = { ValueText("管理") },
+                title = if (signedIn) community.auth.nickname.ifBlank { "账号" } else "邮箱登录",
+                leading = {
+                    if (signedIn) {
+                        AvatarBadge(community.auth.avatar, 26.dp)
+                    } else {
+                        AvatarBadge("eq", 26.dp)
+                    }
+                },
+                trailing = { ValueText(if (signedIn) "账号" else "") },
                 mutedTitle = true,
-                onClick = onOpenIdentity
+                onClick = if (signedIn) onOpenAccount else onOpenLogin
             )
+            if (signedIn) {
+                RowDivider()
+                AuroraRow(
+                    title = "我的发布",
+                    trailing = { ValueText("管理") },
+                    mutedTitle = true,
+                    onClick = onOpenMyPosts
+                )
+            }
         }
 
         AuroraGroup("大家的声音") {
@@ -112,12 +137,12 @@ internal fun CommunityPage(
                             )
                             Spacer(Modifier.height(12.dp))
                             Text(
-                                "发布第一条",
+                                if (signedIn) "发布第一条" else "登录后发布第一条",
                                 fontSize = 15.sp,
                                 fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
                                 color = colors.primary,
                                 modifier = Modifier
-                                    .clickable { onOpenShare() }
+                                    .clickable { if (signedIn) onOpenShare() else onOpenLogin() }
                                     .padding(vertical = 8.dp)
                             )
                         }
@@ -129,7 +154,13 @@ internal fun CommunityPage(
                         CommunityCard(
                             item = item,
                             onOpen = { onOpenDetail(item) },
-                            onLike = { scope.launch { community.toggleLike(item) } }
+                            onLike = {
+                                if (signedIn) {
+                                    scope.launch { community.toggleLike(item) }
+                                } else {
+                                    onOpenLogin()
+                                }
+                            }
                         )
                     }
                     if (community.nextCursor != null) {

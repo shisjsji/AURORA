@@ -168,7 +168,8 @@ private fun AuroraApp() {
     }
 
     val state = remember { AuroraState(context.applicationContext) }
-    val community = remember { CommunityState(context.applicationContext, prefs) }
+    val auth = remember { AuthState(prefs) }
+    val community = remember { CommunityState(auth) }
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
 
@@ -212,6 +213,11 @@ private fun AuroraApp() {
     var showShare by remember { mutableStateOf(false) }
     var showIdentity by remember { mutableStateOf(false) }
     var showMyLikes by remember { mutableStateOf(false) }
+    var showLogin by remember { mutableStateOf(false) }
+    var showMyPosts by remember { mutableStateOf(false) }
+    // The community needs an account now, so the first launch of a signed-out install says so once.
+    // It is a notice, not a wall: dismissing it leaves every other page working untouched.
+    var showLoginHint by remember { mutableStateOf(!auth.loggedIn) }
     var detailItem by remember { mutableStateOf<Community.Item?>(null) }
     // The first launch always gets the explanation once. Afterwards it only returns when a fresh
     // boot probe says this device cannot work - that is a new fact, not a nag.
@@ -377,7 +383,9 @@ private fun AuroraApp() {
                                     active = tab == 2,
                                     onOpenShare = { showShare = true },
                                     onOpenDetail = { detailItem = it },
-                                    onOpenIdentity = { showIdentity = true },
+                                    onOpenLogin = { showLogin = true },
+                                    onOpenAccount = { showIdentity = true },
+                                    onOpenMyPosts = { showMyPosts = true },
                                     onStatusClick = { showDiag = true }
                                 )
                                 else -> SettingsPage(
@@ -393,7 +401,9 @@ private fun AuroraApp() {
                                     onFeedback = { showFeedback = true },
                                     onOpenDiag = { showDiag = true },
                                     onOpenMyLikes = { showMyLikes = true },
-                                    onOpenIdentity = { showIdentity = true },
+                                    onOpenAccount = {
+                                        if (auth.loggedIn) showIdentity = true else showLogin = true
+                                    },
                                     checking = updateChecking,
                                     message = updateMessage,
                                     onCheckUpdate = { runUpdateCheck(manual = true) },
@@ -569,7 +579,50 @@ private fun AuroraApp() {
             }
 
             if (showIdentity) {
-                IdentityPanel(community, scope, dark) { showIdentity = false }
+                AccountPanel(
+                    auth = auth,
+                    community = community,
+                    scope = scope,
+                    dark = dark,
+                    onSignedOut = { showIdentity = false }
+                ) { showIdentity = false }
+            }
+
+            if (showLogin) {
+                LoginPanel(
+                    auth = auth,
+                    scope = scope,
+                    dark = dark,
+                    subtitle = "发布曲线、喜欢和评论需要一个邮箱账号。",
+                    onSignedIn = {
+                        showLogin = false
+                        showLoginHint = false
+                        scope.launch {
+                            community.resetForAuthChange()
+                            community.refreshFeed()
+                        }
+                    },
+                    onDismiss = { showLogin = false }
+                )
+            }
+
+            if (showMyPosts) {
+                MyPostsPanel(
+                    community = community,
+                    scope = scope,
+                    dark = dark,
+                    onOpenDetail = { detailItem = it }
+                ) { showMyPosts = false }
+            }
+
+            if (showLoginHint) {
+                CommunityLoginHintDialog(
+                    onLogin = {
+                        showLoginHint = false
+                        showLogin = true
+                    },
+                    onLater = { showLoginHint = false }
+                )
             }
 
             if (showMyLikes) {
@@ -579,7 +632,19 @@ private fun AuroraApp() {
             }
 
             detailItem?.let { item ->
-                CommunityDetailPanel(item, community, state, dark, scope) { detailItem = null }
+                CommunityDetailPanel(
+                    item = item,
+                    community = community,
+                    state = state,
+                    dark = dark,
+                    scope = scope,
+                    onNeedLogin = {
+                        detailItem = null
+                        showLogin = true
+                    },
+                    onDeleted = { detailItem = null },
+                    onDismiss = { detailItem = null }
+                )
             }
         }
     }
@@ -1389,7 +1454,7 @@ private fun SettingsPage(
     onFeedback: () -> Unit,
     onOpenDiag: () -> Unit,
     onOpenMyLikes: () -> Unit,
-    onOpenIdentity: () -> Unit,
+    onOpenAccount: () -> Unit,
     checking: Boolean,
     message: String?,
     onCheckUpdate: () -> Unit,
@@ -1450,10 +1515,10 @@ private fun SettingsPage(
                 )
                 RowDivider()
                 EntryRow(
-                    title = "社区身份",
+                    title = "账号",
                     action = "管理",
                     dark = dark,
-                    onClick = onOpenIdentity
+                    onClick = onOpenAccount
                 )
             }
 

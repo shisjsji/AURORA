@@ -3,29 +3,48 @@
 /**
  * AURORA 社区服务端。
  *
- * 预设分享 + 喜欢 + 短评论。无账号体系：anonId 是当前设备的句柄，
- * 找回码是唯一身份凭证——卸载重装后凭它把内容、喜欢和昵称头像认领回来。
+ * 邮箱验证码登录（免密码）+ 曲线分享 + 喜欢 + 短评论。
  *
- * 隐私立场与 aurora-feedback 相同：不记录来源 IP，限流窗口内存即可。
+ * 身份从「每台设备一个匿名句柄」换成了「一个邮箱一个账号」：邮箱只用于登录和找回，
+ * 永远不出现在公开信息里；对外展示的只有昵称和头像。旧的匿名身份在首次登录时可以带着
+ * anonId 一起提交，服务端会把内容和喜欢并到新账号上，不会凭空消失。
+ *
+ * 隐私立场与 aurora-feedback 相同：不记录来源 IP，限流窗口在内存里。
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const tls = require('tls');
 const { DatabaseSync } = require('node:sqlite');
 
-const PORT = 5003;
+const PORT = Number(process.env.AURORA_COMMUNITY_PORT || 5003);
 const HOST = '127.0.0.1';
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.AURORA_COMMUNITY_DATA || path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'community.db');
 const TOKEN_FILE = path.join(__dirname, 'admin-token');
+const MAIL_FILE = process.env.AURORA_COMMUNITY_MAIL || path.join(__dirname, 'mail.json');
+const MAIL_STDOUT = process.env.AURORA_COMMUNITY_MAIL_STDOUT === '1';
+
 const MAX_BODY = 32 * 1024;
 const WINDOW_MS = 60 * 1000;
-const MAX_PER_WINDOW = 30;
+const MAX_PER_WINDOW = 60;
 const PAGE_SIZE = 20;
 const CURVE_VALUES = 6;
 const CURVE_RANGE = 120; // 0.1 dB 单位，与 Settings 里的编码一致
+const FLAT_LIMIT = 5; // 全段都在 ±0.5 dB 以内，等于没改
+const CODE_TTL_MS = 10 * 60 * 1000;
+const CODE_RESEND_MS = 60 * 1000;
+const CODE_TRIES = 5;
+const CODE_PER_DAY = 10;
+const SESSION_DAYS = 90;
+const NICKNAME_MAX = 16;
+/** 客户端 Avatars.ALL 的 key，别让公开接口变成任意字符串的存储。 */
+const AVATARS = new Set([
+  'eq', 'music', 'mic', 'album', 'play', 'playlist',
+  'recording', 'notes', 'favorites', 'community', 'layers', 'theme',
+]);
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(DB_FILE);
@@ -68,23 +87,41 @@ CREATE TABLE IF NOT EXISTS comments (
   hidden INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS codes (
+  email TEXT PRIMARY KEY,
+  code_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,
+  sent_at INTEGER NOT NULL,
+  sent_day TEXT NOT NULL DEFAULT '',
+  sent_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  account_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_presets_created ON presets(hidden, id DESC);
+CREATE INDEX IF NOT EXISTS idx_presets_owner ON presets(account_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_comments_preset ON comments(preset_id, id);
+CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
 `);
 
 /**
  * Columns added after the table shipped. `CREATE TABLE IF NOT EXISTS` leaves an existing table
  * alone, so the live database needs the columns bolted on rather than recreated.
  */
-for (const [name, decl] of [
-  ['preset', "TEXT NOT NULL DEFAULT ''"],
-  ['strength', 'INTEGER NOT NULL DEFAULT 100'],
-]) {
-  const columns = db.prepare('PRAGMA table_info(presets)').all().map((c) => c.name);
-  if (!columns.includes(name)) {
-    db.exec(`ALTER TABLE presets ADD COLUMN ${name} ${decl}`);
-  }
+function addColumn(table, name, decl) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!columns.includes(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
 }
+addColumn('presets', 'preset', "TEXT NOT NULL DEFAULT ''");
+addColumn('presets', 'strength', 'INTEGER NOT NULL DEFAULT 100');
+addColumn('accounts', 'email', 'TEXT');
+addColumn('accounts', 'email_verified_at', 'INTEGER');
+// 老账号没有邮箱，所以唯一索引必须是 partial，否则多个 NULL 也不允许重复。
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email) WHERE email IS NOT NULL');
 
 const adminToken = (() => {
   try {
@@ -94,91 +131,45 @@ const adminToken = (() => {
   }
 })();
 
+/** 验证码用 HMAC 存：库泄漏也拿不到能用的 6 位数字。 */
+const codeSecret = (() => {
+  const file = path.join(DATA_DIR, 'code-secret');
+  try {
+    return fs.readFileSync(file, 'utf8').trim();
+  } catch (e) {
+    const fresh = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(file, fresh, { mode: 0o600 });
+    return fresh;
+  }
+})();
+
+const mailConfig = (() => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(MAIL_FILE, 'utf8'));
+    if (!raw || !raw.host || !raw.user || !raw.pass) return null;
+    return {
+      host: String(raw.host),
+      port: Number(raw.port || 465),
+      user: String(raw.user),
+      pass: String(raw.pass),
+      from: String(raw.from || raw.user),
+    };
+  } catch (e) {
+    return null;
+  }
+})();
+
 const hits = new Map();
-function rateLimited(ip) {
+function rateLimited(ip, limit = MAX_PER_WINDOW, windowMs = WINDOW_MS) {
   const now = Date.now();
   const record = hits.get(ip);
   if (!record || now > record.reset) {
-    hits.set(ip, { count: 1, reset: now + WINDOW_MS });
+    hits.set(ip, { count: 1, reset: now + windowMs });
     return false;
   }
   record.count += 1;
-  return record.count > MAX_PER_WINDOW;
+  return record.count > limit;
 }
-
-// 不含易混淆字符的字母表；12 位 ≈ 75 bit，足够当成身份凭证。
-// 必须用 CSPRNG：Math.random 是可预测的伪随机，恢复码等于身份本身。
-const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-function newRecoveryKey() {
-  // 32 整除 256，取模无偏。
-  const bytes = crypto.randomBytes(12);
-  let raw = '';
-  for (let i = 0; i < 12; i++) {
-    raw += KEY_ALPHABET[bytes[i] % KEY_ALPHABET.length];
-  }
-  return raw.slice(0, 4) + '-' + raw.slice(4, 8) + '-' + raw.slice(8);
-}
-
-/** Accepts lowercase, missing dashes or stray spaces; returns the stored form. */
-function normalizeKey(input) {
-  const clean = String(input).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-  if (clean.length !== 12) return String(input).trim().toUpperCase();
-  return clean.slice(0, 4) + '-' + clean.slice(4, 8) + '-' + clean.slice(8);
-}
-
-function accountByAnon(anonId) {
-  return db.prepare('SELECT * FROM accounts WHERE anon_id = ?').get(anonId);
-}
-
-function accountById(id) {
-  return db.prepare('SELECT * FROM accounts WHERE id = ?').get(id);
-}
-
-function ensureAccount(anonId) {
-  let account = accountByAnon(anonId);
-  if (account) return { account, created: false };
-  const nickname = '调音师' + String(1000 + Math.floor(Math.random() * 9000));
-  const key = newRecoveryKey();
-  const result = db.prepare(
-    'INSERT INTO accounts (anon_id, recovery_key, nickname, avatar, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(anonId, key, nickname, 'eq', Date.now());
-  account = accountById(Number(result.lastInsertRowid));
-  return { account, created: true };
-}
-
-function profile(account) {
-  return { nickname: account.nickname, avatar: account.avatar, createdAt: account.created_at };
-}
-
-function card(row, viewerAccountId, likedKnown) {
-  const liked = likedKnown !== undefined
-    ? likedKnown
-    : (viewerAccountId
-      ? !!db.prepare('SELECT 1 FROM likes WHERE preset_id = ? AND account_id = ?')
-          .get(row.id, viewerAccountId)
-      : false);
-  return {
-    id: row.id,
-    name: row.name,
-    curve: row.curve,
-    model: row.model,
-    deviceLabel: row.device_label,
-    bandHz: row.band_hz,
-    preset: row.preset || '',
-    strength: row.strength === null || row.strength === undefined ? 100 : row.strength,
-    nickname: row.nickname,
-    avatar: row.avatar,
-    likes: row.likes_count,
-    comments: row.comment_count,
-    liked,
-    createdAt: row.created_at,
-  };
-}
-
-const FEED_SQL = `
-SELECT p.*, a.nickname, a.avatar FROM presets p
-JOIN accounts a ON a.id = p.account_id
-WHERE p.hidden = 0`;
 
 function reply(res, code, payload) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -202,11 +193,268 @@ function validCurve(curve) {
   return out.join(',');
 }
 
+function curveIsFlat(joined) {
+  return joined.split(',').every((value) => Math.abs(Number(value)) <= FLAT_LIMIT);
+}
+
+function normalizeEmail(input) {
+  if (typeof input !== 'string') return null;
+  const value = input.trim().toLowerCase();
+  if (value.length < 6 || value.length > 120) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value)) return null;
+  return value;
+}
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function hashCode(email, code) {
+  return crypto.createHmac('sha256', codeSecret).update(email + '|' + code).digest('hex');
+}
+
+function dayKey(now) {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+function newRecoveryKey() {
+  const bytes = crypto.randomBytes(12);
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let raw = '';
+  for (let i = 0; i < 12; i++) raw += alphabet[bytes[i] % alphabet.length];
+  return raw.slice(0, 4) + '-' + raw.slice(4, 8) + '-' + raw.slice(8);
+}
+
+/** 每个账号出生时给一个随机昵称，用户登录后可以改。 */
+function defaultNickname() {
+  return '调音师' + String(1000 + crypto.randomInt(9000));
+}
+
+function accountById(id) {
+  return db.prepare('SELECT * FROM accounts WHERE id = ?').get(id);
+}
+
+function profile(account) {
+  return {
+    nickname: account.nickname,
+    avatar: account.avatar,
+    email: account.email || '',
+    createdAt: account.created_at,
+  };
+}
+
+// ---- 发信 ----------------------------------------------------------------
+
+/**
+ * 最小 SMTP 客户端：隐式 TLS（465）+ AUTH LOGIN。
+ *
+ * <p>只发一种邮件，所以不引第三方库 —— 生产机上少一个依赖，也少一次供应链。
+ */
+function smtpSend(cfg, to, subject, body) {
+  return new Promise((resolve, reject) => {
+    const message = [
+      'From: ' + cfg.from,
+      'To: ' + to,
+      'Subject: =?UTF-8?B?' + Buffer.from(subject, 'utf8').toString('base64') + '?=',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      'Date: ' + new Date().toUTCString(),
+      'Message-ID: <' + crypto.randomBytes(12).toString('hex') + '@' + cfg.host + '>',
+      '',
+      Buffer.from(body, 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n'),
+    ].join('\r\n');
+
+    const steps = [
+      'EHLO aurora',
+      'AUTH LOGIN',
+      Buffer.from(cfg.user, 'utf8').toString('base64'),
+      Buffer.from(cfg.pass, 'utf8').toString('base64'),
+      'MAIL FROM:<' + cfg.user + '>',
+      'RCPT TO:<' + to + '>',
+      'DATA',
+      message + '\r\n.',
+      'QUIT',
+    ];
+
+    let socket;
+    let index = 0;
+    let buffer = '';
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      try { socket.end(); } catch (e) { /* already gone */ }
+      if (error) reject(error); else resolve(true);
+    };
+
+    socket = tls.connect({ host: cfg.host, port: cfg.port, servername: cfg.host }, () => {});
+    socket.setTimeout(20000, () => finish(new Error('smtp timeout')));
+    socket.on('error', (error) => finish(error));
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      let newline;
+      while ((newline = buffer.indexOf('\r\n')) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 2);
+        // 多行应答（250-...）要读完最后一行 250 空格才算一个响应。
+        if (/^\d{3}-/.test(line)) continue;
+        const code = Number(line.slice(0, 3));
+        if (code >= 400) {
+          finish(new Error('smtp ' + code + ': ' + line.slice(4)));
+          return;
+        }
+        const next = steps[index++];
+        if (next === undefined) return;
+        socket.write(next + '\r\n');
+      }
+    });
+  });
+}
+
+function loginMailText(code) {
+  return [
+    'AURORA 登录验证码：' + code,
+    '',
+    '10 分钟内有效，只能用来登录你自己的账号。',
+    '如果不是你本人操作，忽略这封邮件即可 —— 没有验证码别人进不来。',
+    '',
+    'AURORA 音频模块',
+  ].join('\r\n');
+}
+
+async function sendCode(email, code) {
+  if (MAIL_STDOUT) {
+    console.log('[mail] ' + email + ' -> ' + code);
+    return { delivered: true, mode: 'stdout' };
+  }
+  if (!mailConfig) throw new Error('mail not configured');
+  await smtpSend(mailConfig, email, 'AURORA 登录验证码', loginMailText(code));
+  return { delivered: true, mode: 'smtp' };
+}
+
+// ---- 会话 ----------------------------------------------------------------
+
+function issueSession(accountId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const now = Date.now();
+  db.prepare('INSERT INTO sessions (token_hash, account_id, created_at, last_seen) VALUES (?, ?, ?, ?)')
+    .run(hashToken(token), accountId, now, now);
+  return token;
+}
+
+function accountFor(req) {
+  const header = req.headers.authorization || '';
+  const match = /^Bearer\s+([a-f0-9]{64})$/i.exec(header);
+  if (!match) return null;
+  const session = db.prepare('SELECT * FROM sessions WHERE token_hash = ?').get(hashToken(match[1].toLowerCase()));
+  if (!session) return null;
+  const now = Date.now();
+  if (now - session.last_seen > SESSION_DAYS * 24 * 3600 * 1000) {
+    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(session.token_hash);
+    return null;
+  }
+  if (now - session.last_seen > 24 * 3600 * 1000) {
+    db.prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ?').run(now, session.token_hash);
+  }
+  const account = accountById(session.account_id);
+  if (!account) {
+    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(session.token_hash);
+    return null;
+  }
+  return account;
+}
+
+// ---- 卡片 ----------------------------------------------------------------
+
+function card(row, viewerAccountId, likedKnown) {
+  const liked = likedKnown !== undefined
+    ? likedKnown
+    : (viewerAccountId
+      ? !!db.prepare('SELECT 1 FROM likes WHERE preset_id = ? AND account_id = ?')
+          .get(row.id, viewerAccountId)
+      : false);
+  return {
+    id: row.id,
+    name: row.name,
+    curve: row.curve,
+    model: row.model,
+    deviceLabel: row.device_label,
+    bandHz: row.band_hz,
+    preset: row.preset || '',
+    strength: row.strength === null || row.strength === undefined ? 100 : row.strength,
+    nickname: row.nickname,
+    avatar: row.avatar,
+    likes: row.likes_count,
+    comments: row.comment_count,
+    liked,
+    mine: viewerAccountId ? row.account_id === viewerAccountId : false,
+    createdAt: row.created_at,
+  };
+}
+
+const FEED_SQL = `
+SELECT p.*, a.nickname, a.avatar FROM presets p
+JOIN accounts a ON a.id = p.account_id
+WHERE p.hidden = 0`;
+
+// ---- 账号归属迁移 --------------------------------------------------------
+
+/**
+ * Adopts whatever the device published before accounts existed.
+ *
+ * <p>The anonymous era minted one account per device handle, and every preset, like and comment
+ * hangs off that row. Binding its email keeps the content; merging into an existing email account
+ * moves it. Either way nothing published by this device is orphaned.
+ */
+function adoptLegacy(account, anonId) {
+  const legacy = db.prepare('SELECT * FROM accounts WHERE anon_id = ?').get(anonId);
+  if (!legacy || legacy.id === account.id) return account;
+  if (legacy.email) return account; // 那个句柄已经是别人的登录账号，不能抢
+
+  db.exec('BEGIN');
+  try {
+    // 内容、喜欢、评论一起并到邮箱账号上，老行随即消失 —— 一个设备句柄不该继续占着内容。
+    db.prepare('UPDATE presets SET account_id = ? WHERE account_id = ?').run(account.id, legacy.id);
+    db.prepare('UPDATE comments SET account_id = ? WHERE account_id = ?').run(account.id, legacy.id);
+    db.prepare(
+      'INSERT OR IGNORE INTO likes (preset_id, account_id, created_at) ' +
+      'SELECT preset_id, ?, created_at FROM likes WHERE account_id = ?'
+    ).run(account.id, legacy.id);
+    db.prepare('DELETE FROM likes WHERE account_id = ?').run(legacy.id);
+    db.prepare('DELETE FROM accounts WHERE id = ?').run(legacy.id);
+    db.exec('COMMIT');
+    return accountById(account.id);
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch (e2) { /* nothing to roll back */ }
+    return account;
+  }
+}
+
+function createAccount(email) {
+  const now = Date.now();
+  const result = db.prepare(
+    'INSERT INTO accounts (anon_id, recovery_key, nickname, avatar, created_at, email, email_verified_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(
+    'acct-' + crypto.randomBytes(8).toString('hex'),
+    newRecoveryKey(),
+    defaultNickname(),
+    'eq',
+    now,
+    email,
+    now
+  );
+  return accountById(Number(result.lastInsertRowid));
+}
+
+// ---- HTTP ---------------------------------------------------------------
+
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && (req.url || '').split('?')[0] === '/health') {
-    return reply(res, 200, { ok: true });
+    return reply(res, 200, { ok: true, mail: Boolean(mailConfig) || MAIL_STDOUT });
   }
-  if (req.method !== 'POST' && req.method !== 'GET' && req.method !== 'DELETE') {
+  if (!['POST', 'GET', 'DELETE', 'PATCH'].includes(req.method)) {
     res.writeHead(405, { 'Content-Type': 'text/plain' });
     return res.end('method not allowed');
   }
@@ -250,78 +498,150 @@ const server = http.createServer((req, res) => {
     try {
       handle(req, res, route, url, body);
     } catch (e) {
+      console.error('handler failed:', e && e.message);
       reply(res, 500, { ok: false, error: 'server error' });
     }
   });
 });
 
 function handle(req, res, route, url, body) {
-  // ---- 账户 ----
-  if (req.method === 'POST' && route === '/account') {
+  // ---- 登录：发验证码 ----
+  if (req.method === 'POST' && route === '/auth/code') {
+    const email = normalizeEmail(body.email);
+    if (!email) return reply(res, 400, { ok: false, error: 'badEmail' });
+
+    const now = Date.now();
+    const row = db.prepare('SELECT * FROM codes WHERE email = ?').get(email);
+    if (row && now - row.sent_at < CODE_RESEND_MS) {
+      return reply(res, 429, {
+        ok: false,
+        error: 'tooSoon',
+        retryAfter: Math.ceil((CODE_RESEND_MS - (now - row.sent_at)) / 1000),
+      });
+    }
+    const day = dayKey(now);
+    const sentToday = row && row.sent_day === day ? row.sent_count : 0;
+    if (sentToday >= CODE_PER_DAY) return reply(res, 429, { ok: false, error: 'dailyLimit' });
+
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    db.prepare(
+      'INSERT INTO codes (email, code_hash, expires_at, tries, sent_at, sent_day, sent_count) ' +
+      'VALUES (?, ?, ?, 0, ?, ?, ?) ' +
+      'ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, ' +
+      'tries = 0, sent_at = excluded.sent_at, sent_day = excluded.sent_day, sent_count = excluded.sent_count'
+    ).run(email, hashCode(email, code), now + CODE_TTL_MS, now, day, sentToday + 1);
+    // 顺手清掉过期行，不用另设定时任务。
+    db.prepare('DELETE FROM codes WHERE expires_at < ?').run(now);
+
+    sendCode(email, code)
+      .then(() => reply(res, 200, { ok: true, ttl: CODE_TTL_MS / 1000, resendIn: CODE_RESEND_MS / 1000 }))
+      .catch((error) => {
+        console.error('sendCode failed:', error && error.message);
+        // 没发出去就别让用户等 60 秒重试：这条码作废。
+        db.prepare('DELETE FROM codes WHERE email = ?').run(email);
+        reply(res, 503, { ok: false, error: 'mailFailed' });
+      });
+    return;
+  }
+
+  // ---- 登录：验码换 token ----
+  if (req.method === 'POST' && route === '/auth/verify') {
+    const email = normalizeEmail(body.email);
+    const code = typeof body.code === 'string' ? body.code.trim() : '';
+    if (!email || !/^\d{6}$/.test(code)) return reply(res, 400, { ok: false, error: 'badRequest' });
+
+    const now = Date.now();
+    const row = db.prepare('SELECT * FROM codes WHERE email = ?').get(email);
+    if (!row || row.expires_at < now) {
+      return reply(res, 400, { ok: false, error: 'expired', message: '验证码已过期，重新发一次。' });
+    }
+    if (row.tries >= CODE_TRIES) {
+      return reply(res, 429, { ok: false, error: 'tooMany', message: '错误次数太多，重新发一次验证码。' });
+    }
+    const expected = Buffer.from(row.code_hash, 'hex');
+    const given = Buffer.from(hashCode(email, code), 'hex');
+    if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {
+      db.prepare('UPDATE codes SET tries = tries + 1 WHERE email = ?').run(email);
+      const left = CODE_TRIES - (row.tries + 1);
+      return reply(res, 400, { ok: false, error: 'badCode', left, message: '验证码不对，还可以试 ' + left + ' 次。' });
+    }
+    db.prepare('DELETE FROM codes WHERE email = ?').run(email);
+
+    let account = db.prepare('SELECT * FROM accounts WHERE email = ?').get(email);
     const anonId = str(body.anonId, 64);
-    if (!anonId) return reply(res, 400, { ok: false, error: 'anonId required' });
-    const nickname = body.nickname === undefined ? undefined : str(body.nickname, 16);
-    const avatar = body.avatar === undefined ? undefined : str(body.avatar, 32);
-    const { account, created } = ensureAccount(anonId);
-    if (nickname !== undefined || avatar !== undefined) {
+    if (!account) {
+      account = createAccount(email);
+      if (anonId) account = adoptLegacy(account, anonId);
+    } else if (anonId) {
+      account = adoptLegacy(account, anonId);
+    }
+    const token = issueSession(account.id);
+    return reply(res, 200, { ok: true, token, profile: profile(account) });
+  }
+
+  if (req.method === 'POST' && route === '/auth/logout') {
+    const header = req.headers.authorization || '';
+    const match = /^Bearer\s+([a-f0-9]{64})$/i.exec(header);
+    if (match) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(match[1].toLowerCase()));
+    return reply(res, 200, { ok: true });
+  }
+
+  // ---- 我的资料 ----
+  if (route === '/me') {
+    const account = accountFor(req);
+    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
+
+    if (req.method === 'GET') return reply(res, 200, { ok: true, profile: profile(account) });
+
+    if (req.method === 'PATCH') {
+      const nickname = body.nickname === undefined ? undefined : str(body.nickname, NICKNAME_MAX);
+      const avatar = body.avatar === undefined ? undefined : String(body.avatar).trim();
+      if (body.nickname !== undefined && !nickname) {
+        return reply(res, 400, { ok: false, error: 'badNickname' });
+      }
+      if (body.avatar !== undefined && !AVATARS.has(avatar)) {
+        return reply(res, 400, { ok: false, error: 'badAvatar' });
+      }
       db.prepare('UPDATE accounts SET nickname = COALESCE(?, nickname), avatar = COALESCE(?, avatar) WHERE id = ?')
-        .run(nickname ?? null, avatar ?? null, account.id);
+        .run(nickname ?? null, body.avatar === undefined ? null : avatar, account.id);
+      return reply(res, 200, { ok: true, profile: profile(accountById(account.id)) });
     }
-    const fresh = accountById(account.id);
-    return reply(res, 200, {
-      ok: true,
-      created,
-      recoveryKey: created ? fresh.recovery_key : undefined,
-      profile: profile(fresh),
-    });
-  }
 
-  if (req.method === 'POST' && route === '/account/recover') {
-    const input = str(body.recoveryKey, 32);
-    const anonId = str(body.anonId, 64);
-    if (!input || !anonId) return reply(res, 400, { ok: false, error: 'recoveryKey and anonId required' });
-    const account = db.prepare('SELECT * FROM accounts WHERE recovery_key = ?').get(normalizeKey(input));
-    if (!account) return reply(res, 404, { ok: false, error: 'unknown recovery key' });
-    // The handle this device already uses may belong to another account (a like or a comment
-    // created one before the old key was entered). Release that binding first, in one
-    // transaction, or the UNIQUE constraint turns a normal recovery into a 500.
-    try {
+    if (req.method === 'DELETE') {
+      // 注销：内容和喜欢一起删，邮箱立刻可以重新注册成一个空账号。
       db.exec('BEGIN');
-      db.prepare(
-        "UPDATE accounts SET anon_id = 'released-' || id || '-' || lower(hex(randomblob(4))) " +
-        'WHERE anon_id = ? AND id != ?'
-      ).run(anonId, account.id);
-      db.prepare('UPDATE accounts SET anon_id = ? WHERE id = ?').run(anonId, account.id);
-      db.exec('COMMIT');
-    } catch (e) {
-      try { db.exec('ROLLBACK'); } catch (e2) { /* nothing left to roll back */ }
-      return reply(res, 500, { ok: false, error: 'recover failed' });
+      try {
+        db.prepare('DELETE FROM likes WHERE account_id = ?').run(account.id);
+        db.prepare(
+          'DELETE FROM likes WHERE preset_id IN (SELECT id FROM presets WHERE account_id = ?)'
+        ).run(account.id);
+        db.prepare(
+          'DELETE FROM comments WHERE preset_id IN (SELECT id FROM presets WHERE account_id = ?)'
+        ).run(account.id);
+        db.prepare('DELETE FROM comments WHERE account_id = ?').run(account.id);
+        db.prepare('DELETE FROM presets WHERE account_id = ?').run(account.id);
+        db.prepare('DELETE FROM sessions WHERE account_id = ?').run(account.id);
+        db.prepare('DELETE FROM accounts WHERE id = ?').run(account.id);
+        db.exec('COMMIT');
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch (e2) { /* nothing to roll back */ }
+        return reply(res, 500, { ok: false, error: 'delete failed' });
+      }
+      return reply(res, 200, { ok: true });
     }
-    return reply(res, 200, { ok: true, profile: profile(account) });
-  }
-
-  if (req.method === 'GET' && route === '/account') {
-    const anonId = str(url.searchParams.get('anonId') || '', 64);
-    if (!anonId) return reply(res, 400, { ok: false, error: 'anonId required' });
-    const account = accountByAnon(anonId);
-    if (!account) return reply(res, 404, { ok: false, error: 'no account' });
-    return reply(res, 200, { ok: true, profile: profile(account) });
-  }
-
-  if (req.method === 'POST' && route === '/account/rotate') {
-    const anonId = str(body.anonId, 64);
-    if (!anonId) return reply(res, 400, { ok: false, error: 'anonId required' });
-    const account = accountByAnon(anonId);
-    if (!account) return reply(res, 404, { ok: false, error: 'no account' });
-    const key = newRecoveryKey();
-    db.prepare('UPDATE accounts SET recovery_key = ? WHERE id = ?').run(key, account.id);
-    return reply(res, 200, { ok: true, recoveryKey: key });
+    return reply(res, 405, { ok: false, error: 'method not allowed' });
   }
 
   // ---- 信息流 ----
   if (req.method === 'GET' && route === '/presets') {
+    const viewer = accountFor(req);
+    const mine = url.searchParams.get('mine') === '1';
+    if (mine) {
+      if (!viewer) return reply(res, 401, { ok: false, error: 'unauthorized' });
+      const rows = db.prepare(`${FEED_SQL} AND p.account_id = ? ORDER BY p.id DESC LIMIT 60`).all(viewer.id);
+      return reply(res, 200, { ok: true, items: rows.map((row) => card(row, viewer.id)), nextCursor: null });
+    }
     const cursor = Number(url.searchParams.get('cursor') || '0');
-    const viewer = url.searchParams.get('anonId') ? accountByAnon(str(url.searchParams.get('anonId'), 64) || '') : null;
     // cursor = 上一页最后一条的 id；首页没有 cursor，直接取最新。
     const rows = cursor > 0
       ? db.prepare(`${FEED_SQL} AND p.id < ? ORDER BY p.id DESC LIMIT ?`).all(cursor, PAGE_SIZE + 1)
@@ -337,104 +657,128 @@ function handle(req, res, route, url, body) {
           .map((row) => row.preset_id)
       );
     }
+    const nextCursor = rows.length > PAGE_SIZE ? page[page.length - 1].id : null;
     return reply(res, 200, {
       ok: true,
-      items: page.map((row) => card(row, viewer ? viewer.id : null, likedIds.has(row.id))),
-      nextCursor: rows.length > PAGE_SIZE && page.length > 0 ? page[page.length - 1].id : null,
+      items: page.map((row) => card(row, viewer ? viewer.id : undefined, likedIds.has(row.id))),
+      nextCursor,
     });
   }
 
-  if (req.method === 'GET' && /^\/presets\/(\d+)$/.test(route)) {
-    const id = Number(route.match(/^\/presets\/(\d+)$/)[1]);
+  // ---- 单条 ----
+  const detailMatch = route.match(/^\/presets\/(\d+)$/);
+  if (req.method === 'GET' && detailMatch) {
+    const id = Number(detailMatch[1]);
+    const viewer = accountFor(req);
     const row = db.prepare(`${FEED_SQL} AND p.id = ?`).get(id);
     if (!row) return reply(res, 404, { ok: false, error: 'not found' });
-    const viewer = url.searchParams.get('anonId') ? accountByAnon(str(url.searchParams.get('anonId'), 64) || '') : null;
     const comments = db.prepare(
-      'SELECT c.id, c.body, c.created_at, a.nickname, a.avatar FROM comments c JOIN accounts a ON a.id = c.account_id WHERE c.preset_id = ? AND c.hidden = 0 ORDER BY c.id'
+      `SELECT c.*, a.nickname, a.avatar FROM comments c
+       JOIN accounts a ON a.id = c.account_id
+       WHERE c.preset_id = ? AND c.hidden = 0 ORDER BY c.id ASC LIMIT 200`
     ).all(id);
-    const out = card(row, viewer ? viewer.id : null);
+    const out = card(row, viewer ? viewer.id : undefined);
     out.commentList = comments.map((c) => ({
       id: c.id, body: c.body, nickname: c.nickname, avatar: c.avatar, createdAt: c.created_at,
     }));
     return reply(res, 200, { ok: true, item: out });
   }
 
+  // ---- 删除自己的曲线 ----
+  if (req.method === 'DELETE' && detailMatch) {
+    const account = accountFor(req);
+    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
+    const id = Number(detailMatch[1]);
+    const row = db.prepare('SELECT * FROM presets WHERE id = ?').get(id);
+    if (!row) return reply(res, 404, { ok: false, error: 'not found' });
+    if (row.account_id !== account.id) return reply(res, 403, { ok: false, error: 'not owner' });
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM comments WHERE preset_id = ?').run(id);
+      db.prepare('DELETE FROM likes WHERE preset_id = ?').run(id);
+      db.prepare('DELETE FROM presets WHERE id = ?').run(id);
+      db.exec('COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch (e2) { /* nothing to roll back */ }
+      return reply(res, 500, { ok: false, error: 'delete failed' });
+    }
+    return reply(res, 200, { ok: true });
+  }
+
   // ---- 发布 ----
   if (req.method === 'POST' && route === '/presets') {
-    const anonId = str(body.anonId, 64);
+    const account = accountFor(req);
+    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
     const name = str(body.name, 20);
     const curve = validCurve(body.curve);
     const model = str(body.model, 64);
     const deviceLabel = str(body.deviceLabel, 24);
     const bandHz = typeof body.bandHz === 'string' ? body.bandHz.slice(0, 40) : '';
-    // 发布者当时的预设与强度，只用于在详情页说明来源。旧版客户端不带这两个字段。
+    // 发布者当时的预设与强度，只用于在详情页说明来源。
     const preset = /^[a-z0-9_-]{1,24}$/.test(body.preset || '') ? body.preset : '';
     const rawStrength = Number(body.strength);
     const strength = Number.isFinite(rawStrength)
       ? Math.min(100, Math.max(0, Math.round(rawStrength)))
       : 100;
-    if (!anonId || !name || !curve || !model || !deviceLabel) {
+    if (!name || !curve || !model || !deviceLabel) {
       return reply(res, 400, { ok: false, error: 'name, curve, model, deviceLabel required' });
     }
-    const { account, created } = ensureAccount(anonId);
+    // 全段平直的曲线没有任何信息量：别人点开看到一条直线，等于骗一次点击。
+    if (curveIsFlat(curve)) {
+      return reply(res, 422, { ok: false, error: 'flat', message: '这条曲线所有频段都是 0，等于没调过，没必要发布。' });
+    }
+    // 同一个人发同样的曲线没有任何意义，直接指向已有的那条。
+    const duplicate = db.prepare(
+      'SELECT id, name FROM presets WHERE account_id = ? AND curve = ? AND hidden = 0 ORDER BY id DESC LIMIT 1'
+    ).get(account.id, curve);
+    if (duplicate) {
+      return reply(res, 409, {
+        ok: false,
+        error: 'duplicate',
+        id: duplicate.id,
+        message: '你已经发过这条曲线了（「' + duplicate.name + '」），不用再发一次。',
+      });
+    }
     const result = db.prepare(
       'INSERT INTO presets (account_id, name, curve, model, device_label, band_hz, preset, strength, created_at) ' +
       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(account.id, name, curve, model, deviceLabel, bandHz, preset, strength, Date.now());
-    return reply(res, 200, {
-      ok: true,
-      id: Number(result.lastInsertRowid),
-      created,
-      recoveryKey: created ? account.recovery_key : undefined,
-    });
+    return reply(res, 200, { ok: true, id: Number(result.lastInsertRowid) });
   }
 
   // ---- 喜欢 ----
   const likeMatch = route.match(/^\/presets\/(\d+)\/like$/);
-  if (likeMatch) {
+  if (likeMatch && (req.method === 'POST' || req.method === 'DELETE')) {
+    const account = accountFor(req);
+    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
     const id = Number(likeMatch[1]);
     const preset = db.prepare('SELECT id FROM presets WHERE id = ? AND hidden = 0').get(id);
     if (!preset) return reply(res, 404, { ok: false, error: 'not found' });
-    const anonId = str(body.anonId, 64);
-    if (!anonId) return reply(res, 400, { ok: false, error: 'anonId required' });
-    const { account, created } = ensureAccount(anonId);
     if (req.method === 'POST') {
       const result = db.prepare('INSERT OR IGNORE INTO likes (preset_id, account_id, created_at) VALUES (?, ?, ?)')
         .run(id, account.id, Date.now());
       if (result.changes > 0) {
         db.prepare('UPDATE presets SET likes_count = likes_count + 1 WHERE id = ?').run(id);
       }
-      // A like can be the first thing a person does. Hand back the key when this call created the
-      // account, so the identity is never born without its owner seeing the way back in.
-      return reply(res, 200, {
-        ok: true,
-        created,
-        recoveryKey: created ? account.recovery_key : undefined,
-      });
+      return reply(res, 200, { ok: true });
     }
-    if (req.method === 'DELETE') {
-      const result = db.prepare('DELETE FROM likes WHERE preset_id = ? AND account_id = ?').run(id, account.id);
-      if (result.changes > 0) {
-        db.prepare('UPDATE presets SET likes_count = MAX(likes_count - 1, 0) WHERE id = ?').run(id);
-      }
-      return reply(res, 200, {
-        ok: true,
-        created,
-        recoveryKey: created ? account.recovery_key : undefined,
-      });
+    const result = db.prepare('DELETE FROM likes WHERE preset_id = ? AND account_id = ?').run(id, account.id);
+    if (result.changes > 0) {
+      db.prepare('UPDATE presets SET likes_count = MAX(likes_count - 1, 0) WHERE id = ?').run(id);
     }
+    return reply(res, 200, { ok: true });
   }
 
   // ---- 评论 ----
   const commentMatch = route.match(/^\/presets\/(\d+)\/comments$/);
   if (req.method === 'POST' && commentMatch) {
+    const account = accountFor(req);
+    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
     const id = Number(commentMatch[1]);
     const preset = db.prepare('SELECT id FROM presets WHERE id = ? AND hidden = 0').get(id);
     if (!preset) return reply(res, 404, { ok: false, error: 'not found' });
-    const anonId = str(body.anonId, 64);
     const commentBody = str(body.body, 140);
-    if (!anonId || !commentBody) return reply(res, 400, { ok: false, error: 'anonId and body required' });
-    const { account, created } = ensureAccount(anonId);
+    if (!commentBody) return reply(res, 400, { ok: false, error: 'body required' });
     const result = db.prepare(
       'INSERT INTO comments (preset_id, account_id, body, created_at) VALUES (?, ?, ?, ?)'
     ).run(id, account.id, commentBody, Date.now());
@@ -444,17 +788,13 @@ function handle(req, res, route, url, body) {
       id: Number(result.lastInsertRowid),
       nickname: account.nickname,
       avatar: account.avatar,
-      created,
-      recoveryKey: created ? account.recovery_key : undefined,
     });
   }
 
   // ---- 我的喜欢 ----
   if (req.method === 'GET' && route === '/likes') {
-    const anonId = str(url.searchParams.get('anonId') || '', 64);
-    if (!anonId) return reply(res, 400, { ok: false, error: 'anonId required' });
-    const account = accountByAnon(anonId);
-    if (!account) return reply(res, 200, { ok: true, items: [] });
+    const account = accountFor(req);
+    if (!account) return reply(res, 401, { ok: false, error: 'unauthorized' });
     const rows = db.prepare(`
       SELECT p.*, a.nickname, a.avatar FROM likes l
       JOIN presets p ON p.id = l.preset_id
@@ -481,10 +821,10 @@ function handle(req, res, route, url, body) {
     return reply(res, 200, { ok: true });
   }
 
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
-  res.end('not found');
+  return reply(res, 404, { ok: false, error: 'not found' });
 }
 
 server.listen(PORT, HOST, () => {
-  console.log('aurora-community listening on ' + HOST + ':' + PORT);
+  console.log('aurora community on http://' + HOST + ':' + PORT +
+    ' (mail: ' + (MAIL_STDOUT ? 'stdout' : mailConfig ? mailConfig.host : 'not configured') + ')');
 });

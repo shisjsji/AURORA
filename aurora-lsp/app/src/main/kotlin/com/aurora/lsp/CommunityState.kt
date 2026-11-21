@@ -1,25 +1,19 @@
 package com.aurora.lsp
 
-import android.content.Context
-import android.content.SharedPreferences
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.UUID
 
 /**
- * State for the community page: the feed, my likes, and the anonymous identity.
+ * State for the community page: the feed, my published curves, my likes.
  *
- * <p>Identity is deliberately invisible: the same install-level anonId the feedback reporter uses
- * stands in for an account. The recovery key is the only durable secret; it is shown once when the
- * server first creates the account, and whoever holds it can reclaim everything on a new install.
+ * <p>Browsing works signed out; everything that creates something needs the account in [auth].
+ * The page is not the gatekeeper, though - every write carries a token and the server refuses
+ * without one, so a stale screen cannot publish on its own.
  */
-class CommunityState(
-    private val context: Context,
-    private val prefs: SharedPreferences
-) {
+class CommunityState(val auth: AuthState) {
 
     enum class FeedStatus { Idle, Loading, Ready, Empty, Offline }
 
@@ -32,42 +26,26 @@ class CommunityState(
     var loadingMore by mutableStateOf(false)
         private set
 
+    var myPosts by mutableStateOf<List<Community.Item>>(emptyList())
+        private set
+    var myPostsStatus by mutableStateOf(FeedStatus.Idle)
+        private set
+
     var myLikes by mutableStateOf<List<Community.Item>>(emptyList())
         private set
     var likesStatus by mutableStateOf(FeedStatus.Idle)
         private set
 
-    var nickname by mutableStateOf("")
-        private set
-    var avatar by mutableStateOf("eq")
-        private set
-
-    /** Shown once, right after the server creates the identity: "save this". */
-    var freshRecoveryKey by mutableStateOf<String?>(null)
-        private set
-
     var error by mutableStateOf<String?>(null)
         private set
 
-    /** Same key and generation as Feedback: one identity per install, shared by both features. */
-    val anonId: String
-        get() = synchronized(prefs) {
-            prefs.getString(KEY_ANON, null)?.let { return it }
-            val value = UUID.randomUUID().toString()
-            prefs.edit().putString(KEY_ANON, value).apply()
-            value
-        }
-
-    init {
-        nickname = prefs.getString(KEY_NICKNAME, "").orEmpty()
-        avatar = prefs.getString(KEY_AVATAR, "eq").orEmpty().ifBlank { "eq" }
-    }
+    val token: String? get() = auth.token
 
     suspend fun refreshFeed() {
         if (feedStatus == FeedStatus.Loading) return
         feedStatus = FeedStatus.Loading
         error = null
-        when (val result = Community.feed(anonId)) {
+        when (val result = Community.feed(token)) {
             is Community.Result.Ok -> {
                 feed = result.value.items
                 nextCursor = result.value.nextCursor
@@ -88,7 +66,7 @@ class CommunityState(
         val cursor = nextCursor ?: return
         if (loadingMore) return
         loadingMore = true
-        when (val result = Community.feed(anonId, cursor)) {
+        when (val result = Community.feed(token, cursor)) {
             is Community.Result.Ok -> {
                 val known = feed.map { it.id }.toHashSet()
                 feed = feed + result.value.items.filter { it.id !in known }
@@ -99,9 +77,31 @@ class CommunityState(
         loadingMore = false
     }
 
+    suspend fun refreshMine() {
+        val current = token ?: run {
+            myPosts = emptyList()
+            myPostsStatus = FeedStatus.Idle
+            return
+        }
+        myPostsStatus = FeedStatus.Loading
+        when (val result = Community.mine(current)) {
+            is Community.Result.Ok -> {
+                myPosts = result.value.items
+                myPostsStatus = if (result.value.items.isEmpty()) FeedStatus.Empty else FeedStatus.Ready
+            }
+            is Community.Result.Denied -> myPostsStatus = if (myPosts.isEmpty()) FeedStatus.Offline else FeedStatus.Ready
+            is Community.Result.Failed -> myPostsStatus = if (myPosts.isEmpty()) FeedStatus.Offline else FeedStatus.Ready
+        }
+    }
+
     suspend fun refreshLikes() {
+        val current = token ?: run {
+            myLikes = emptyList()
+            likesStatus = FeedStatus.Idle
+            return
+        }
         likesStatus = FeedStatus.Loading
-        when (val result = Community.likes(anonId)) {
+        when (val result = Community.likes(current)) {
             is Community.Result.Ok -> {
                 myLikes = result.value.items
                 likesStatus = if (result.value.items.isEmpty()) FeedStatus.Empty else FeedStatus.Ready
@@ -112,18 +112,17 @@ class CommunityState(
     }
 
     suspend fun toggleLike(item: Community.Item): Boolean = withContext(Dispatchers.IO) {
+        val current = token ?: return@withContext false
         val target = !item.liked
-        when (val result = Community.like(item.id, anonId, target)) {
+        when (val result = Community.like(item.id, current, target)) {
             is Community.Result.Ok -> {
-                // A like can be the first thing a person does; if that created the account, show
-                // the key right away instead of losing it.
-                result.value?.let { freshRecoveryKey = it }
                 fun patch(list: List<Community.Item>) = list.map {
                     if (it.id == item.id) {
                         it.copy(liked = target, likes = (it.likes + if (target) 1 else -1).coerceAtLeast(0))
                     } else it
                 }
                 feed = patch(feed)
+                myPosts = patch(myPosts)
                 myLikes = if (target) myLikes else myLikes.filterNot { it.id == item.id }
                 true
             }
@@ -139,111 +138,84 @@ class CommunityState(
         bandHz: String,
         preset: String = "",
         strength: Int = 100
-    ): Community.Result<Community.PublishResult> {
+    ): Community.Result<Int> {
         error = null
-        val result = Community.publish(anonId, name, curve, model, deviceLabel, bandHz, preset, strength)
-        if (result is Community.Result.Ok) {
-            result.value.recoveryKey?.let { freshRecoveryKey = it }
-        } else if (result is Community.Result.Denied) {
-            error = "服务器拒绝了这次发布（" + result.code + "）。"
-        } else if (result is Community.Result.Failed) {
-            error = "连不上社区服务器，等网络正常再试。"
+        val current = token ?: return Community.Result.Denied(401, "unauthorized")
+        val result = Community.publish(
+            token = current,
+            name = name,
+            curve = curve,
+            model = model,
+            deviceLabel = deviceLabel,
+            bandHz = bandHz,
+            preset = preset,
+            strength = strength
+        )
+        when (result) {
+            is Community.Result.Ok -> {
+                refreshFeed()
+                refreshMine()
+            }
+            is Community.Result.Denied -> error = result.message ?: "服务器拒绝了这次发布（" + result.code + "）。"
+            is Community.Result.Failed -> error = "连不上社区服务器，等网络正常再试。"
         }
         return result
     }
 
-    suspend fun addComment(presetId: Int, body: String): Boolean {
-        return when (val result = Community.comment(presetId, anonId, body)) {
+    /** Deletes one of my published curves. The server enforces ownership; this is the happy path. */
+    suspend fun deletePost(item: Community.Item): Boolean {
+        val current = token ?: return false
+        return when (val result = Community.deletePreset(current, item.id)) {
             is Community.Result.Ok -> {
-                result.value?.let { freshRecoveryKey = it }
-                true
-            }
-            else -> false
-        }
-    }
-
-    /** Pushes nickname and avatar to the server and caches them locally for offline display. */
-    suspend fun updateProfile(newNickname: String, newAvatar: String): Boolean {
-        val result = Community.account(anonId, newNickname.ifBlank { null }, newAvatar)
-        return when (result) {
-            is Community.Result.Ok -> {
-                nickname = result.value.nickname.ifBlank { newNickname }
-                avatar = result.value.avatar.ifBlank { newAvatar }
-                prefs.edit()
-                    .putString(KEY_NICKNAME, nickname)
-                    .putString(KEY_AVATAR, avatar)
-                    .apply()
+                feed = feed.filterNot { it.id == item.id }
+                myPosts = myPosts.filterNot { it.id == item.id }
+                myLikes = myLikes.filterNot { it.id == item.id }
+                if (myPosts.isEmpty()) myPostsStatus = FeedStatus.Empty
                 error = null
                 true
             }
             is Community.Result.Denied -> {
-                error = "服务器拒绝了这次修改（" + result.code + "）。"
+                error = result.message ?: "删除失败（" + result.code + "）。"
                 false
             }
             is Community.Result.Failed -> {
-                error = "连不上社区服务器，身份信息没有保存。"
+                error = "连不上社区服务器，删除没完成。"
                 false
             }
         }
     }
 
-    /** Fetches the profile the server has for this anonId (no-op when the account is new). */
-    suspend fun refreshProfile() {
-        when (val result = Community.account(anonId)) {
+    suspend fun addComment(presetId: Int, body: String): Community.Result<Unit> {
+        val current = token ?: return Community.Result.Denied(401, "unauthorized")
+        return when (val result = Community.comment(presetId, current, body)) {
             is Community.Result.Ok -> {
-                nickname = result.value.nickname.ifBlank { nickname }
-                avatar = result.value.avatar.ifBlank { avatar }
-                prefs.edit()
-                    .putString(KEY_NICKNAME, nickname)
-                    .putString(KEY_AVATAR, avatar)
-                    .apply()
-            }
-            else -> Unit
-        }
-    }
-
-    suspend fun recoverIdentity(key: String): Boolean {
-        return when (val result = Community.recover(key.trim(), anonId)) {
-            is Community.Result.Ok -> {
-                nickname = result.value.nickname
-                avatar = result.value.avatar
-                prefs.edit()
-                    .putString(KEY_NICKNAME, nickname)
-                    .putString(KEY_AVATAR, avatar)
-                    .apply()
-                error = null
-                refreshFeed()
-                true
+                feed = feed.map { if (it.id == presetId) it.copy(comments = it.comments + 1) else it }
+                result
             }
             is Community.Result.Denied -> {
-                error = "找回码不对，或者这个身份已经不存在了。"
-                false
+                error = result.message ?: "评论没发出去（" + result.code + "）。"
+                result
             }
             is Community.Result.Failed -> {
-                error = "连不上社区服务器，稍后再试。"
-                false
+                error = "连不上社区服务器，评论没发出去。"
+                result
             }
         }
     }
 
-    suspend fun rotateKey(): String? {
-        return when (val result = Community.rotateKey(anonId)) {
-            is Community.Result.Ok -> result.value.ifBlank { null }
-            else -> null
-        }
-    }
-
-    fun clearFreshKey() {
-        freshRecoveryKey = null
+    /** After signing in or out: whatever the feed said about ownership is no longer true. */
+    fun resetForAuthChange() {
+        feed = emptyList()
+        feedStatus = FeedStatus.Idle
+        nextCursor = null
+        myPosts = emptyList()
+        myPostsStatus = FeedStatus.Idle
+        myLikes = emptyList()
+        likesStatus = FeedStatus.Idle
+        error = null
     }
 
     fun clearError() {
         error = null
-    }
-
-    companion object {
-        private const val KEY_ANON = "anonId"
-        private const val KEY_NICKNAME = "community_nickname"
-        private const val KEY_AVATAR = "community_avatar"
     }
 }

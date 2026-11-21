@@ -8,11 +8,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Client for the community service (preset sharing, likes, comments).
+ * Client for the community service: email login, preset sharing, likes, comments.
  *
- * <p>Same shape as Feedback and Update: HttpURLConnection on IO, sealed results that keep "the
- * server refused" apart from "the network never got there" - the community page has to say which
- * one it is, because only one of them has anything to retry.
+ * <p>Reads are public; every write carries the login token. Results keep "the server refused" apart
+ * from "the network never got there", and a refusal carries the server's reason code so the UI can
+ * say "you already published this" instead of a bare status number.
  */
 object Community {
 
@@ -34,6 +34,8 @@ object Community {
         val likes: Int,
         val comments: Int,
         val liked: Boolean,
+        /** True when this is the viewer's own preset. Always false while logged out. */
+        val mine: Boolean,
         val createdAt: Long
     )
 
@@ -47,34 +49,39 @@ object Community {
 
     data class Feed(val items: List<Item>, val nextCursor: Int?)
 
-    data class Profile(val nickname: String, val avatar: String)
+    data class Profile(val nickname: String, val avatar: String, val email: String)
 
-    data class PublishResult(val id: Int, val recoveryKey: String?)
+    data class Session(val token: String, val profile: Profile)
+
+    data class CodeSent(val ttlSeconds: Int, val resendSeconds: Int)
 
     sealed interface Result<out T> {
         data class Ok<T>(val value: T) : Result<T>
 
-        /** Reached the server; it said no. */
-        data class Denied(val code: Int) : Result<Nothing>
+        /** Reached the server; it said no. [error] is the machine-readable reason, if any. */
+        data class Denied(
+            val code: Int,
+            val error: String? = null,
+            val message: String? = null
+        ) : Result<Nothing>
 
         /** Never reached the server: DNS, TLS, timeout, socket. */
         data class Failed(val reason: String) : Result<Nothing>
     }
 
-    private fun bodyOf(connection: HttpURLConnection): String =
-        connection.inputStream.bufferedReader().use { it.readText() }
-
     private fun call(
         path: String,
         method: String = "GET",
-        payload: JSONObject? = null
+        payload: JSONObject? = null,
+        token: String? = null
     ): Result<JSONObject> = try {
         val connection = URL(BASE + path).openConnection() as HttpURLConnection
         connection.requestMethod = method
         connection.connectTimeout = 8000
-        connection.readTimeout = 12000
+        connection.readTimeout = 15000
         connection.setRequestProperty("User-Agent", "AURORA-Android")
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        if (token != null) connection.setRequestProperty("Authorization", "Bearer " + token)
         if (payload != null) {
             connection.doOutput = true
             connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
@@ -82,9 +89,20 @@ object Community {
         try {
             val code = connection.responseCode
             if (code !in 200..299) {
-                Result.Denied(code)
+                // The reason lives in the error body; a bare 409 helps nobody.
+                val text = try {
+                    connection.errorStream?.bufferedReader()?.use { it.readText() }
+                } catch (t: Throwable) {
+                    null
+                }
+                val parsed = text?.let { runCatching { JSONObject(it) }.getOrNull() }
+                Result.Denied(
+                    code = code,
+                    error = parsed?.optString("error")?.takeIf { it.isNotBlank() },
+                    message = parsed?.optString("message")?.takeIf { it.isNotBlank() }
+                )
             } else {
-                val text = bodyOf(connection)
+                val text = connection.inputStream.bufferedReader().use { it.readText() }
                 Result.Ok(JSONObject(text))
             }
         } finally {
@@ -93,6 +111,12 @@ object Community {
     } catch (t: Throwable) {
         Result.Failed(t.javaClass.simpleName)
     }
+
+    private fun parseProfile(json: JSONObject?): Profile = Profile(
+        nickname = json?.optString("nickname").orEmpty(),
+        avatar = json?.optString("avatar").orEmpty().ifBlank { "eq" },
+        email = json?.optString("email").orEmpty()
+    )
 
     private fun parseItem(json: JSONObject): Item? {
         val curveRaw = json.optString("curve", "")
@@ -112,6 +136,7 @@ object Community {
             likes = json.optInt("likes"),
             comments = json.optInt("comments"),
             liked = json.optBoolean("liked"),
+            mine = json.optBoolean("mine"),
             createdAt = json.optLong("createdAt")
         )
     }
@@ -125,36 +150,95 @@ object Community {
         return Feed(items, cursor)
     }
 
-    suspend fun feed(anonId: String, cursor: Int = 0): Result<Feed> = withContext(Dispatchers.IO) {
-        val suffix = if (cursor > 0) "&cursor=$cursor" else ""
-        call("/presets?anonId=$anonId$suffix").map(::parseFeed)
+    // ---- 登录 ----
+
+    suspend fun requestCode(email: String): Result<CodeSent> = withContext(Dispatchers.IO) {
+        call("/auth/code", "POST", JSONObject().put("email", email)).map { json ->
+            CodeSent(
+                ttlSeconds = json.optInt("ttl", 600),
+                resendSeconds = json.optInt("resendIn", 60)
+            )
+        }
     }
 
-    suspend fun likes(anonId: String): Result<Feed> = withContext(Dispatchers.IO) {
-        call("/likes?anonId=$anonId").map(::parseFeed)
-    }
-
-    suspend fun detail(id: Int, anonId: String): Result<Pair<Item, List<Comment>>> =
+    /**
+     * Exchanges a code for a session. [anonId] is the anonymous handle this install used before
+     * accounts existed: the server uses it to move that content onto the account, so a first login
+     * does not orphan anything the device published earlier.
+     */
+    suspend fun verify(email: String, code: String, anonId: String?): Result<Session> =
         withContext(Dispatchers.IO) {
-            when (val result = call("/presets/$id?anonId=$anonId")) {
+            val payload = JSONObject().apply {
+                put("email", email)
+                put("code", code)
+                if (!anonId.isNullOrBlank()) put("anonId", anonId)
+            }
+            call("/auth/verify", "POST", payload).map { json ->
+                Session(
+                    token = json.optString("token"),
+                    profile = parseProfile(json.optJSONObject("profile"))
+                )
+            }
+        }
+
+    suspend fun me(token: String): Result<Profile> = withContext(Dispatchers.IO) {
+        call("/me", token = token).map { json -> parseProfile(json.optJSONObject("profile")) }
+    }
+
+    suspend fun updateProfile(token: String, nickname: String?, avatar: String?): Result<Profile> =
+        withContext(Dispatchers.IO) {
+            val payload = JSONObject()
+            if (nickname != null) payload.put("nickname", nickname)
+            if (avatar != null) payload.put("avatar", avatar)
+            call("/me", "PATCH", payload, token).map { json ->
+                parseProfile(json.optJSONObject("profile"))
+            }
+        }
+
+    suspend fun logout(token: String): Result<Unit> = withContext(Dispatchers.IO) {
+        call("/auth/logout", "POST", JSONObject(), token).map { }
+    }
+
+    /** Deletes the account and everything under it. The email is free again afterwards. */
+    suspend fun deleteAccount(token: String): Result<Unit> = withContext(Dispatchers.IO) {
+        call("/me", "DELETE", null, token).map { }
+    }
+
+    // ---- 内容 ----
+
+    suspend fun feed(token: String?, cursor: Int = 0): Result<Feed> = withContext(Dispatchers.IO) {
+        val suffix = if (cursor > 0) "?cursor=$cursor" else ""
+        call("/presets" + suffix, token = token).map(::parseFeed)
+    }
+
+    suspend fun mine(token: String): Result<Feed> = withContext(Dispatchers.IO) {
+        call("/presets?mine=1", token = token).map(::parseFeed)
+    }
+
+    suspend fun likes(token: String): Result<Feed> = withContext(Dispatchers.IO) {
+        call("/likes", token = token).map(::parseFeed)
+    }
+
+    suspend fun detail(id: Int, token: String?): Result<Pair<Item, List<Comment>>> =
+        withContext(Dispatchers.IO) {
+            when (val result = call("/presets/$id", token = token)) {
                 is Result.Ok -> {
-                    val item = result.value.optJSONObject("item")?.let(::parseItem)
+                    val itemJson = result.value.optJSONObject("item")
+                    val item = itemJson?.let(::parseItem)
                         ?: return@withContext Result.Failed("bad payload")
-                    val comments = result.value.optJSONObject("item")
-                        ?.optJSONArray("commentList")
-                        ?.let { array ->
-                            (0 until array.length()).mapNotNull { index ->
-                                array.optJSONObject(index)?.let { c ->
-                                    Comment(
-                                        c.optInt("id"),
-                                        c.optString("body"),
-                                        c.optString("nickname"),
-                                        c.optString("avatar"),
-                                        c.optLong("createdAt")
-                                    )
-                                }
+                    val comments = itemJson.optJSONArray("commentList")?.let { array ->
+                        (0 until array.length()).mapNotNull { index ->
+                            array.optJSONObject(index)?.let { c ->
+                                Comment(
+                                    c.optInt("id"),
+                                    c.optString("body"),
+                                    c.optString("nickname"),
+                                    c.optString("avatar"),
+                                    c.optLong("createdAt")
+                                )
                             }
-                        } ?: emptyList()
+                        }
+                    } ?: emptyList()
                     Result.Ok(item to comments)
                 }
                 is Result.Denied -> result
@@ -163,7 +247,7 @@ object Community {
         }
 
     suspend fun publish(
-        anonId: String,
+        token: String,
         name: String,
         curve: FloatArray,
         model: String,
@@ -171,9 +255,8 @@ object Community {
         bandHz: String,
         preset: String,
         strength: Int
-    ): Result<PublishResult> = withContext(Dispatchers.IO) {
+    ): Result<Int> = withContext(Dispatchers.IO) {
         val payload = JSONObject().apply {
-            put("anonId", anonId)
             put("name", name)
             put("curve", JSONArray(curve.map { Math.round(it * 10f) }))
             put("model", model)
@@ -182,71 +265,22 @@ object Community {
             put("preset", preset)
             put("strength", strength.coerceIn(0, 100))
         }
-        call("/presets", "POST", payload).map { json ->
-            PublishResult(
-                id = json.optInt("id"),
-                recoveryKey = json.optString("recoveryKey").takeIf { it.isNotBlank() }
-            )
-        }
+        call("/presets", "POST", payload, token).map { json -> json.optInt("id") }
     }
 
-    /** Like or unlike. The recovery key rides back when this call created the account. */
-    suspend fun like(id: Int, anonId: String, on: Boolean): Result<String?> =
-        withContext(Dispatchers.IO) {
-            val payload = JSONObject().put("anonId", anonId)
-            call("/presets/$id/like", if (on) "POST" else "DELETE", payload).map { json ->
-                json.optString("recoveryKey").takeIf { it.isNotBlank() }
-            }
-        }
-
-    suspend fun comment(id: Int, anonId: String, body: String): Result<String?> =
-        withContext(Dispatchers.IO) {
-            val payload = JSONObject().apply {
-                put("anonId", anonId)
-                put("body", body)
-            }
-            call("/presets/$id/comments", "POST", payload).map { json ->
-                json.optString("recoveryKey").takeIf { it.isNotBlank() }
-            }
-        }
-
-    suspend fun account(
-        anonId: String,
-        nickname: String? = null,
-        avatar: String? = null
-    ): Result<Profile> = withContext(Dispatchers.IO) {
-        val payload = JSONObject().put("anonId", anonId)
-        if (nickname != null) payload.put("nickname", nickname)
-        if (avatar != null) payload.put("avatar", avatar)
-        call("/account", "POST", payload).map { json ->
-            val profile = json.optJSONObject("profile")
-            Profile(
-                nickname = profile?.optString("nickname").orEmpty(),
-                avatar = profile?.optString("avatar").orEmpty()
-            )
-        }
+    suspend fun deletePreset(token: String, id: Int): Result<Unit> = withContext(Dispatchers.IO) {
+        call("/presets/$id", "DELETE", null, token).map { }
     }
 
-    suspend fun recover(recoveryKey: String, anonId: String): Result<Profile> =
+    suspend fun like(id: Int, token: String, on: Boolean): Result<Unit> =
         withContext(Dispatchers.IO) {
-            val payload = JSONObject().apply {
-                put("recoveryKey", recoveryKey)
-                put("anonId", anonId)
-            }
-            call("/account/recover", "POST", payload).map { json ->
-                val profile = json.optJSONObject("profile")
-                Profile(
-                    nickname = profile?.optString("nickname").orEmpty(),
-                    avatar = profile?.optString("avatar").orEmpty()
-                )
-            }
+            call("/presets/$id/like", if (on) "POST" else "DELETE", JSONObject(), token).map { }
         }
 
-    suspend fun rotateKey(anonId: String): Result<String> = withContext(Dispatchers.IO) {
-        call("/account/rotate", "POST", JSONObject().put("anonId", anonId)).map { json ->
-            json.optString("recoveryKey")
+    suspend fun comment(id: Int, token: String, body: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            call("/presets/$id/comments", "POST", JSONObject().put("body", body), token).map { }
         }
-    }
 
     private fun <T> Result<JSONObject>.map(transform: (JSONObject) -> T): Result<T> =
         when (this) {
