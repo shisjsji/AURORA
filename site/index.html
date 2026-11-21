@@ -2,380 +2,402 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>AURORA · 按播放会话挂的六段均衡器</title>
-<meta name="description" content="AURORA 用 LSPosed 注入 system_server，给每个正在播放的会话挂一条六段曲线。不改系统文件，不重启音频服务，关掉即回原厂。">
-<meta name="theme-color" content="#101113">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23101113'/%3E%3Cg stroke='%23F2A5B8' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M8 20v-6M13 24V8M18 21v-9M23 18v-4'/%3E%3C/g%3E%3C/svg%3E">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AURORA · 六段均衡器</title>
+<meta name="description" content="给小米手机外放叠一条六段均衡曲线。不改系统文件，关掉即回原厂。">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23b2455e'/%3E%3Cg stroke='%23fff' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M9 21v-6M13.5 25V8M18 22v-8M22.5 19v-4'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root {
-    --bg: #101113;
-    --surface: #17191B;
-    --hair: #26292C;
-    --hair-soft: #1E2124;
-    --ink: #ECE9E4;
-    --ink-2: #A9ABAE;
-    --ink-3: #8A8D91;
-    --accent: #F2A5B8;
-    --sans: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
-    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    --gut: 20px;
-    --col: 660px;
+    --ink: #1d1d1f;
+    --ink2: #6e6e73;
+    --bg: #ffffff;
+    --bg2: #f5f5f7;
+    --line: rgba(0, 0, 0, 0.08);
+    --accent: #b2455e;
+    --r-lg: 28px;
+    --r-md: 20px;
+    --ease: cubic-bezier(.22, .61, .36, 1);
   }
-
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
-
   body {
     margin: 0;
     background: var(--bg);
     color: var(--ink);
-    font-family: var(--sans);
-    font-size: 17px;
-    line-height: 1.72;
-    font-variant-numeric: tabular-nums;
+    font: 400 17px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
     -webkit-font-smoothing: antialiased;
-    text-underline-offset: 3px;
-    text-decoration-thickness: 1px;
+  }
+  a { color: inherit; text-decoration: none; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+  nav {
+    height: 56px; display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--line);
+  }
+  nav .brand { font-size: 15px; font-weight: 600; letter-spacing: .08em; }
+  nav .dl {
+    font-size: 14px; color: var(--accent); border: 1px solid currentColor;
+    padding: 6px 14px; border-radius: 999px;
   }
 
-  ::selection { background: rgba(242, 165, 184, 0.28); color: #fff; }
-
-  :focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 3px;
-    border-radius: 4px;
-  }
-
-  a { color: var(--ink); }
-
-  .col { width: min(100% - var(--gut) * 2, var(--col)); margin: 0 auto; }
-
-  /* 顶栏 */
-  .bar {
-    position: sticky; top: 0; z-index: 10;
-    background: rgba(16, 17, 19, 0.9);
-    border-bottom: 1px solid var(--hair-soft);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-  }
-  .bar-in {
-    height: 56px;
-    display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  }
-  .mark {
-    display: inline-flex; align-items: center; gap: 10px;
-    font-size: 14px; letter-spacing: 0.16em; font-weight: 500;
-    text-decoration: none;
-  }
-  .mark svg { display: block; }
-  .bar a.get {
-    font-family: var(--mono); font-size: 13px;
-    color: var(--accent); text-decoration: none;
-    padding: 7px 13px; border: 1px solid rgba(242, 165, 184, 0.4); border-radius: 8px;
-  }
-  .bar a.get:hover { background: rgba(242, 165, 184, 0.08); }
-
-  /* 首屏 */
-  .hero { padding: 44px 0 0; }
+  header { padding: 56px 0 0; text-align: center; }
   h1 {
-    font-size: 30px; line-height: 1.28; font-weight: 600;
-    text-wrap: balance;
-    letter-spacing: -0.012em; margin: 0 0 18px; max-width: 20em;
+    margin: 0 0 14px;
+    font-size: clamp(32px, 7vw, 58px);
+    line-height: 1.12;
+    letter-spacing: -0.02em;
+    font-weight: 600;
   }
-  .lede { font-size: 17px; color: var(--ink-2); margin: 0 0 26px; max-width: 30em; }
-  .lede b { color: var(--ink); font-weight: 500; }
+  .sub { margin: 0 auto 28px; max-width: 22em; font-size: 19px; color: var(--ink2); }
+  .cta {
+    display: inline-block; background: var(--ink); color: #fff;
+    font-size: 17px; font-weight: 500; padding: 14px 30px; border-radius: 999px;
+    transition: background .2s var(--ease);
+  }
+  .cta:hover { background: #000; }
+  .hint { margin: 14px 0 0; font-size: 14px; color: var(--ink2); }
 
-  .act { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 18px; }
-  .act .go {
-    display: inline-block; text-decoration: none;
-    background: var(--ink); color: #141517;
-    font-size: 16px; font-weight: 600;
-    padding: 13px 24px; border-radius: 12px;
+  .shots {
+    display: grid; gap: 20px; margin: 44px 0 0;
+    grid-template-columns: 1fr;
   }
-  .act .go:hover { background: #fff; }
-  .act .req { font-size: 13px; color: var(--ink-3); }
-
-  /* 六段刻度：全站唯一的签名细节，出现在这里一次 */
-  .bands { margin: 40px 0 0; }
-  .bands ul {
-    list-style: none; margin: 0; padding: 0;
-    display: flex; justify-content: space-between;
-    border-top: 1px solid var(--hair);
+  .shots img {
+    width: 100%; height: auto; display: block;
+    border-radius: var(--r-lg); background: var(--bg2);
+    border: 1px solid var(--line);
   }
-  .bands li {
-    position: relative; padding-top: 10px;
-    font-family: var(--mono); font-size: 11px; color: var(--ink-3);
-  }
-  .bands li::before {
-    content: ""; position: absolute; top: -1px; left: 0;
-    width: 1px; height: 6px; background: var(--hair);
+  @media (min-width: 760px) {
+    .shots { grid-template-columns: 1fr 1fr; gap: 28px; }
+    .shots img:first-child { margin-top: 28px; }
   }
 
-  .shot {
-    display: block; width: 100%; height: auto;
-    border-radius: 18px; border: 1px solid var(--hair);
-    margin: 36px 0 0;
-  }
-
-  /* 章节 */
-  .block { padding: 56px 0 0; }
-  .block + .block { border-top: 1px solid var(--hair-soft); margin-top: 56px; }
-
+  section { padding: 72px 0 0; }
   h2 {
-    font-size: 22px; line-height: 1.4; font-weight: 600;
-    text-wrap: balance;
-    letter-spacing: -0.006em; margin: 0 0 16px;
-  }
-  .block p { color: var(--ink-2); margin: 0 0 16px; }
-  .block p:last-child { margin-bottom: 0; }
-  .block p b { color: var(--ink); font-weight: 500; }
-  code {
-    font-family: var(--mono); font-size: 0.88em;
-    color: var(--ink); background: var(--surface);
-    padding: 2px 6px; border-radius: 5px;
+    margin: 0 0 24px; font-size: clamp(24px, 3.4vw, 34px);
+    line-height: 1.25; letter-spacing: -0.01em; font-weight: 600;
   }
 
-  /* 安装步骤：真实顺序，所以有编号 */
-  ol.steps { list-style: none; margin: 8px 0 0; padding: 0; counter-reset: s; }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
+  @media (min-width: 760px) { .grid { grid-template-columns: repeat(3, 1fr); gap: 24px; } }
+  .card {
+    background: var(--bg2); border-radius: var(--r-md); padding: 26px 24px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
+  .card p { margin: 0; font-size: 15px; color: var(--ink2); }
+
+  .bands {
+    display: flex; justify-content: space-between;
+    font-size: 13px; color: var(--ink2);
+    border-top: 1px solid var(--line);
+    padding-top: 10px; margin: 0 0 28px;
+    max-width: 560px;
+  }
+
+  ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; }
   ol.steps li {
-    counter-increment: s;
-    position: relative;
-    padding: 14px 0 14px 38px;
-    border-bottom: 1px solid var(--hair-soft);
-    color: var(--ink-2);
+    counter-increment: s; position: relative; padding: 14px 0 14px 34px;
+    border-bottom: 1px solid var(--line); color: var(--ink2); font-size: 16px;
   }
   ol.steps li:last-child { border-bottom: 0; }
   ol.steps li::before {
-    content: counter(s);
-    position: absolute; left: 0; top: 14px;
-    width: 24px;
-    font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+    content: counter(s); position: absolute; left: 0; top: 15px;
+    font-size: 13px; color: var(--ink2); opacity: .7;
   }
-  ol.steps li b { color: var(--ink); font-weight: 500; }
+  ol.steps b { color: var(--ink); font-weight: 500; }
 
-  /* 预设：桌面是表，手机是一行一条 */
-  table { width: 100%; border-collapse: collapse; margin: 8px 0 0; }
-  th {
-    text-align: left; font-size: 12px; font-weight: 400; color: var(--ink-3);
-    padding: 0 0 10px; border-bottom: 1px solid var(--hair);
+  .presets { display: grid; gap: 10px 24px; grid-template-columns: 1fr; }
+  @media (min-width: 620px) { .presets { grid-template-columns: 1fr 1fr; } }
+  .presets div {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 15px;
   }
-  th + th, td + td { padding-left: 14px; }
-  td {
-    padding: 13px 0; border-bottom: 1px solid var(--hair-soft);
-    font-size: 15px; color: var(--ink-2); vertical-align: top;
-  }
-  td:first-child { color: var(--ink); font-weight: 500; white-space: nowrap; }
-  td.n { font-family: var(--mono); font-size: 13px; color: var(--ink-3); white-space: nowrap; }
-  tr:last-child td { border-bottom: 0; }
+  .presets span:first-child { color: var(--ink); }
+  .presets span:last-child { color: var(--ink2); font-variant-numeric: tabular-nums; }
 
-  dl.facts { margin: 8px 0 0; }
-  dl.facts div {
-    display: grid; grid-template-columns: 88px 1fr; gap: 12px;
-    padding: 13px 0; border-bottom: 1px solid var(--hair-soft);
-  }
-  dl.facts div:last-child { border-bottom: 0; }
-  dt { font-size: 13px; color: var(--ink-3); padding-top: 2px; }
-  dd { margin: 0; font-size: 15px; color: var(--ink-2); }
+  .log { margin: 0; padding: 0; list-style: none; }
+  .log li { padding: 14px 0; border-bottom: 1px solid var(--line); font-size: 15px; color: var(--ink2); }
+  .log li:last-child { border-bottom: 0; }
+  .log b { color: var(--ink); font-weight: 500; margin-right: 10px; }
 
-  /* 更新日志 */
-  ul.log { list-style: none; margin: 8px 0 0; padding: 0; }
-  ul.log li { padding: 16px 0; border-bottom: 1px solid var(--hair-soft); }
-  ul.log li:last-child { border-bottom: 0; }
-  .row { display: flex; align-items: baseline; gap: 12px; }
-  .row .ver { font-family: var(--mono); font-size: 13px; color: var(--accent); }
-  .row .date { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
-  ul.log p { margin: 6px 0 0; font-size: 15px; color: var(--ink-2); }
+/* ===== 演示：复制键光扫 ===== */
+.demo { padding: 72px 0 0; }
+.demo-row { display: flex; flex-wrap: wrap; gap: 40px 64px; align-items: flex-start; }
+.demo-block { flex: 1 1 320px; min-width: 0; }
+.demo-note { margin: 14px 0 0; font-size: 13px; color: var(--ink2); }
+.demo-note a { color: var(--accent); }
 
-  footer {
-    margin-top: 56px; padding: 24px 0 44px;
-    border-top: 1px solid var(--hair-soft);
-  }
-  footer p { margin: 0 0 8px; font-size: 13px; color: var(--ink-3); }
-  footer a { color: var(--ink-2); text-decoration: none; border-bottom: 1px solid var(--hair); }
-  footer a:hover { color: var(--ink); }
+.copybtn {
+  position: relative; isolation: isolate; overflow: hidden;
+  display: inline-flex; align-items: center; gap: 12px;
+  background: #f0f0f2; border: 1px solid var(--line); border-radius: 999px;
+  padding: 10px 20px 10px 10px; cursor: pointer;
+  font: inherit; font-size: 15px; color: var(--ink);
+  transition: background .2s var(--ease);
+}
+.copybtn:hover { background: #e9e9ec; }
+.copybtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.copybtn .stack { display: flex; }
+.copybtn .stack i {
+  width: 26px; height: 26px; border-radius: 50%; background: #fff;
+  border: 1px solid var(--line);
+  display: grid; place-items: center;
+  margin-left: -8px;
+}
+.copybtn .stack i:first-child { margin-left: 0; }
+.copybtn .stack svg { width: 14px; height: 14px; display: block; }
+.copybtn .lbl { position: relative; min-width: 92px; text-align: left; }
+/* 光带：紫到橙，从左扫到右；文字的换字被它盖住 */
+.copybtn .sweep {
+  position: absolute; inset: -1px; z-index: 2; pointer-events: none;
+  background: linear-gradient(100deg,
+    rgba(139, 92, 246, 0) 0%, rgba(139, 92, 246, .85) 26%,
+    rgba(249, 115, 22, .9) 62%, rgba(249, 115, 22, 0) 100%);
+  mask-image: linear-gradient(90deg, transparent 0 34%, #000 46% 54%, transparent 66% 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0 34%, #000 46% 54%, transparent 66% 100%);
+  opacity: 0; transform: translateX(-38%);
+}
+.copybtn.sweeping .sweep { animation: sweep 560ms var(--ease) forwards; }
+@keyframes sweep {
+  0%   { opacity: 0; transform: translateX(-38%); }
+  18%  { opacity: 1; }
+  78%  { opacity: 1; }
+  100% { opacity: 0; transform: translateX(38%); }
+}
+/* 光经过中间时把字换掉，眼睛看到的是光在走 */
+.copybtn .lbl span { display: block; transition: opacity 80ms linear; }
+.copybtn.sweeping .lbl span { opacity: 0; }
+.copybtn.copied .lbl span { opacity: 1; }
 
-  @media (min-width: 760px) {
-    :root { --gut: 32px; --col: 700px; }
-    .hero { padding-top: 72px; }
-    h1 { font-size: 44px; }
-    h2 { font-size: 26px; }
-    .block { padding-top: 88px; }
-    .block + .block { margin-top: 88px; }
-    .shot { margin-top: 48px; }
-    footer { margin-top: 88px; }
-  }
+/* ===== 演示：玻璃相片文件夹 ===== */
+.folders { display: flex; gap: 18px; flex-wrap: wrap; }
+.folder {
+  position: relative; width: 168px; height: 208px;
+  perspective: 900px; cursor: pointer;
+}
+.folder .sheets {
+  position: absolute; inset: 0; border-radius: 18px; overflow: hidden;
+  background: #f4f1ec; border: 1px solid var(--line);
+}
+.folder .sheet {
+  position: absolute; width: 44%; aspect-ratio: 3/4; border-radius: 6px;
+  background: var(--tone); box-shadow: 0 6px 14px rgba(0,0,0,.16);
+  transition: transform .34s var(--ease), box-shadow .34s var(--ease);
+  transform-origin: center bottom;
+}
+.folder .sheet:nth-child(1) { left: 7%;  top: 16%; transform: rotate(-7deg); }
+.folder .sheet:nth-child(2) { left: 29%; top: 10%; transform: rotate(3deg); }
+.folder .sheet:nth-child(3) { left: 52%; top: 18%; transform: rotate(9deg); }
+.folder.open .sheet:nth-child(1) { transform: rotate(-9deg) translate(-8%, -6%); }
+.folder.open .sheet:nth-child(2) { transform: rotate(2deg) translateY(-10%); }
+.folder.open .sheet:nth-child(3) { transform: rotate(11deg) translate(8%, -4%); }
+.folder.open .sheet:hover { transform: translateY(-22%) scale(1.06); box-shadow: 0 14px 26px rgba(0,0,0,.22); }
+/* 前盖：磨砂玻璃，只透出里面的色块 */
+.folder .cover {
+  position: absolute; inset: 0; border-radius: 18px;
+  background: rgba(255,255,255,.42);
+  backdrop-filter: blur(14px) saturate(1.25);
+  -webkit-backdrop-filter: blur(14px) saturate(1.25);
+  border: 1px solid rgba(255,255,255,.6);
+  box-shadow: 0 10px 24px rgba(0,0,0,.10);
+  transform-origin: left center;
+  transition: transform .52s var(--ease), box-shadow .52s var(--ease);
+  display: flex; align-items: flex-end; padding: 16px;
+}
+.folder .cover::after {
+  content: ""; position: absolute; inset: 0; border-radius: 18px; pointer-events: none;
+  background:
+    radial-gradient(60% 50% at 30% 34%, var(--tone) 0%, transparent 70%),
+    radial-gradient(50% 44% at 72% 62%, var(--tone2) 0%, transparent 72%);
+  filter: blur(10px) saturate(1.1);
+  opacity: .85;
+}
+.folder .cover b {
+  position: relative; z-index: 1; font-size: 13px; font-weight: 600; color: #2b2b2e;
+  text-shadow: 0 1px 0 rgba(255,255,255,.8);
+}
+.folder.open .cover { transform: rotateY(-176deg); box-shadow: 0 18px 40px rgba(0,0,0,.18); }
 
-  /* 桌面：文案在左，产品图在右并从底部延伸出去，避免一列居中显得空 */
-  @media (min-width: 980px) {
-    :root { --col: 1040px; }
-    .block, footer { max-width: 700px; }
-    .hero {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
-      column-gap: 64px;
-      align-items: start;
-    }
-    .hero .shot { margin: 0; }
-  }
-
-  /* 一次性入场：主视觉从下方 8px 升起，指数缓出 */
-  @media (prefers-reduced-motion: no-preference) {
-    .hero .shot, .hero h1, .hero .lede, .hero .act {
-      animation: rise 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
-    }
-    .hero .lede { animation-delay: 40ms; }
-    .hero .act { animation-delay: 80ms; }
-    .hero .shot { animation-delay: 140ms; }
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: none; }
-    }
-    .act .go { transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1); }
-  }
+@media (prefers-reduced-motion: reduce) {
+  .copybtn.sweeping .sweep { animation-duration: 1ms; }
+  .folder .sheet, .folder .cover { transition: none; }
+}
 
   @media (max-width: 560px) {
-    table thead { display: none; }
-    table tr { display: block; padding: 14px 0; border-bottom: 1px solid var(--hair-soft); }
-    table tr:last-child { border-bottom: 0; }
-    table td { display: block; padding: 0; border: 0; }
-    table td + td { padding-left: 0; }
-    table td.n { margin-top: 3px; }
-    table td:last-child { margin-top: 2px; color: var(--ink-3); font-size: 14px; }
+    .folder { width: 104px; height: 130px; }
+    .folders { gap: 10px; }
+    .folder .cover { padding: 10px; }
+    .folder .cover b { font-size: 11px; }
+    .copybtn { padding: 8px 16px 8px 8px; font-size: 14px; }
   }
+
+  footer {
+    margin-top: 72px; padding: 24px 0 56px; border-top: 1px solid var(--line);
+    font-size: 14px; color: var(--ink2); line-height: 1.8;
+  }
+  footer a { color: var(--accent); }
 </style>
 </head>
 <body>
 
-<div class="bar">
-  <div class="col bar-in">
-    <a class="mark" href="/">
-      <svg width="18" height="18" viewBox="0 0 32 32" aria-hidden="true">
-        <g stroke="#F2A5B8" stroke-width="2.4" stroke-linecap="round">
-          <path d="M8 21v-7M13 25V8M18 22v-10M23 19v-5"/>
-        </g>
-      </svg>
-      AURORA
-    </a>
-    <a class="get" href="/download/AURORA-1.3.3.apk">下载 1.3.3</a>
-  </div>
-</div>
+<div class="wrap">
+  <nav>
+    <span class="brand">AURORA</span>
+    <a class="dl" href="/download/AURORA-1.3.3.apk">下载 1.3.3</a>
+  </nav>
 
-<main class="col">
+  <header>
+    <h1>给外放叠一条<br>自己的曲线</h1>
+    <p class="sub">六段均衡，按播放会话挂载。不改系统文件，关掉即回原厂。</p>
+    <a class="cta" href="/download/AURORA-1.3.3.apk">下载 APK</a>
+    <p class="hint">需要 Root 与 LSPosed · 小米 17 系列已验证</p>
 
-  <header class="hero">
-    <div class="hero-copy">
-    <h1>在系统均衡器上叠一条曲线</h1>
-    <p class="lede">
-      AURORA 用 LSPosed 注入 <b>system_server</b>，给每一个正在播放的会话挂一条六段曲线。
-      不改 <code>/odm</code> 里的 Dolby 配置，不重启 audioserver，不替换系统文件——关掉就回到原厂。
-    </p>
-    <div class="act">
-      <a class="go" href="/download/AURORA-1.3.3.apk">下载 APK</a>
-      <span class="req">需要 Root 与 LSPosed · 只在小米 17 系列验证过</span>
+    <div class="shots">
+      <img src="/img/shot-tone.webp" alt="音效页" width="760" height="1527">
+      <img src="/img/shot-eq.webp" alt="均衡页" width="760" height="1527" loading="lazy">
     </div>
-
-    <div class="bands" aria-hidden="true">
-      <ul>
-        <li>80</li><li>200</li><li>500</li><li>1.5k</li><li>4k</li><li>10k</li>
-      </ul>
-    </div>
-    </div>
-
-    <img class="shot" src="/img/shot-tone.webp" width="720" height="1567"
-         alt="音效页：当前曲线、九个预设与开关">
   </header>
 
-  <section class="block">
-    <h2>为什么是六段</h2>
-    <p>手机扬声器只在大约 300 Hz 到 6 kHz 之间能有效还原。往 47 Hz 或 12 kHz 堆增益，曲线好看，耳朵听不出来。</p>
-    <p>所以这里只做六个点：<code>80 / 200 / 500 / 1500 / 4000 / 10000 Hz</code>。每一段都落在你听得见的地方，单段范围 ±12 dB，抬升有 6 dB 上限，剩下的余量留给不削顶。</p>
+  <section>
+    <h2>它是怎么工作的</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>挂在会话上</h3>
+        <p>空间音频会把音乐换到独立输出线程，全局 EQ 会被绕过。这里按会话挂，两条链路都生效。</p>
+      </div>
+      <div class="card">
+        <h3>只做六个点</h3>
+        <p>80 到 10k 六个频点，落在外放真正能还原的范围里。抬升留 6 dB 余量，不削顶。</p>
+      </div>
+      <div class="card">
+        <h3>关掉就回原厂</h3>
+        <p>不写 /odm，不重启音频服务，不替换系统文件。卸载即消失。</p>
+      </div>
+    </div>
   </section>
 
-  <section class="block">
-    <h2>挂在会话上，不是挂在设备上</h2>
-    <p>系统一开空间音频，音乐就被换到独立的输出线程，全局混音上做的任何改动都会被绕过。这也是很多均衡器「装了没反应」的原因。</p>
-    <p>AURORA 按播放会话挂载，普通链路和空间音频链路都生效。没有会话在播放的时候，它什么都不做。</p>
-    <img class="shot" src="/img/shot-eq.webp" width="720" height="1567"
-         alt="均衡页：六段滑杆、声场宽度与感知响度" loading="lazy">
-  </section>
-
-  <section class="block">
+  <section>
     <h2>九套曲线</h2>
-    <p>每套至少有一个频段相对平直偏 5 dB 以上，两两之间至少有一处差 4 dB。切换应该听得出来，听不出来就是没做好。</p>
-    <table>
-      <thead><tr><th>预设</th><th>曲线</th><th>听感</th></tr></thead>
-      <tbody>
-        <tr><td>原厂平直</td><td class="n">0 0 0 0 0 0</td><td>不叠加任何曲线</td></tr>
-        <tr><td>自然均衡</td><td class="n">+2 0 0 0 +1 +1</td><td>轻微抬一点厚度</td></tr>
-        <tr><td>哈曼卡顿</td><td class="n">+8 +2 −1 +1 +3 +2</td><td>流行与人声的默认选择</td></tr>
-        <tr><td>柏林之声</td><td class="n">+1 0 −1 +3 +6 +6</td><td>中高频打开，器乐分离</td></tr>
-        <tr><td>现场低频</td><td class="n">+10 +4 −2 +2 +4 +3</td><td>低频拉满，浑浊区让开</td></tr>
-        <tr><td>影院包围</td><td class="n">+8 +3 −2 0 +3 +2</td><td>下盘厚，极高频收</td></tr>
-        <tr><td>人声清晰</td><td class="n">−4 −2 +1 +6 +4 +1</td><td>主唱贴耳，背景后退</td></tr>
-        <tr><td>明亮解析</td><td class="n">−3 −1 0 +3 +7 +8</td><td>齿音与镲片跳出来</td></tr>
-        <tr><td>夜间柔化</td><td class="n">+5 0 0 −3 −4 −5</td><td>高频收敛，小音量不刺耳</td></tr>
-      </tbody>
-    </table>
+    <div class="bands"><span>80</span><span>200</span><span>500</span><span>1.5k</span><span>4k</span><span>10k</span></div>
+    <div class="presets">
+      <div><span>原厂平直</span><span>0 0 0 0 0 0</span></div>
+      <div><span>自然均衡</span><span>+2 0 0 0 +1 +1</span></div>
+      <div><span>哈曼卡顿</span><span>+8 +2 −1 +1 +3 +2</span></div>
+      <div><span>柏林之声</span><span>+1 0 −1 +3 +6 +6</span></div>
+      <div><span>现场低频</span><span>+10 +4 −2 +2 +4 +3</span></div>
+      <div><span>影院包围</span><span>+8 +3 −2 0 +3 +2</span></div>
+      <div><span>人声清晰</span><span>−4 −2 +1 +6 +4 +1</span></div>
+      <div><span>明亮解析</span><span>−3 −1 0 +3 +7 +8</span></div>
+      <div><span>夜间柔化</span><span>+5 0 0 −3 −4 −5</span></div>
+    </div>
   </section>
 
-  <section class="block">
+  <section>
     <h2>装上去要五步</h2>
     <ol class="steps">
-      <li>确认设备已经用 KernelSU 或 Magisk 拿到 Root，并且装了 LSPosed。</li>
-      <li>安装 APK，<b>先打开一次</b>，让系统注册这个应用。</li>
-      <li>在 LSPosed 里启用 AURORA，作用域勾「系统」。</li>
-      <li>重启设备，让模块进入 system_server。</li>
-      <li>打开 App，开启「叠加调音」，播放任意音频就能听出区别。</li>
+      <li>设备已 Root，装好 LSPosed。</li>
+      <li>安装 APK，<b>先打开一次</b>。</li>
+      <li>LSPosed 里启用 AURORA，作用域勾「系统」。</li>
+      <li>重启设备。</li>
+      <li>打开「叠加调音」，随便放首歌。</li>
     </ol>
   </section>
 
-  <section class="block">
-    <h2>适用与限制</h2>
-    <dl class="facts">
-      <div><dt>机型</dt><dd>小米 17 系列（pandora / 25098PN5AC），澎湃 OS 4.0，Android 17</dd></div>
-      <div><dt>其它机型</dt><dd>没有验证过。诊断页会给出链路自检结果，可以用它判断能不能用。</dd></div>
-      <div><dt>不改什么</dt><dd>/odm 里的 Dolby 配置、persist.vendor.audio.* 属性、audioserver 进程、任何系统文件</dd></div>
-      <div><dt>会话切换</dt><dd>换歌时有两秒左右空窗，新会话被捡到之后才挂上曲线</dd></div>
-    </dl>
-  </section>
-
-  <section class="block" id="log">
+  <section>
     <h2>更新日志</h2>
     <ul class="log">
-      <li>
-        <div class="row"><span class="ver">1.3.3</span><span class="date">2026-11</span></div>
-        <p>社区页上线：匿名分享曲线、喜欢、短评论。诊断页降为二级入口，Dock 保持四格。</p>
-      </li>
-      <li>
-        <div class="row"><span class="ver">1.3.2</span><span class="date">2026-11</span></div>
-        <p>修复沉浸声路径的杂音：空间化会话的限幅器阈值下探 4 dB，补偿渲染器在限幅器下游的增益。</p>
-      </li>
-      <li>
-        <div class="row"><span class="ver">1.3.1</span><span class="date">2026-11</span></div>
-        <p>修复限幅器的反射构造签名——此前它从未生效，实际跑的是 AOSP 默认的 −2 dBFS 砖墙。新增设备适配包机制。</p>
-      </li>
-      <li>
-        <div class="row"><span class="ver">1.3.0</span><span class="date">2026-11</span></div>
-        <p>界面按四页重做，新增声场宽度与感知响度。</p>
-      </li>
-      <li>
-        <div class="row"><span class="ver">1.2.0</span><span class="date">2026-11</span></div>
-        <p>放弃 Dolby DAP，改驱动 AOSP 的 DynamicsProcessing；频段从二十段收成六段。</p>
-      </li>
-      <li>
-        <div class="row"><span class="ver">1.0.0</span><span class="date">2026-10</span></div>
-        <p>首个版本。</p>
-      </li>
+      <li><b>1.3.3</b>社区页上线：分享曲线、喜欢、评论 <span style="opacity:.6">2026-11</span></li>
+      <li><b>1.3.2</b>修复沉浸声路径的杂音 <span style="opacity:.6">2026-11</span></li>
+      <li><b>1.3.1</b>修复限幅器从未生效的问题 <span style="opacity:.6">2026-11</span></li>
+      <li><b>1.2.0</b>改驱动系统均衡器，频段从二十段收成六段 <span style="opacity:.6">2026-11</span></li>
     </ul>
   </section>
 
-  <footer>
-    <p>AURORA 是个人项目，不是商业产品。只在小米 17 Pro 上验证过，其它机型不保证能用。</p>
-    <p>问题与建议：App 内「设置 → 反馈」会带上日志，或发邮件到 <a href="mailto:i@lingluandf.online">i@lingluandf.online</a></p>
-    <p>界面组件参考 MIUIX 与 KernelSU（GPL-3.0），液态玻璃折射来自 AndroidLiquidGlass（Apache-2.0）。</p>
-  </footer>
+<section class="demo">
+    <h2>两个小交互</h2>
+    <div class="demo-row">
+      <div class="demo-block">
+        <button class="copybtn" type="button" id="copybtn" aria-live="polite">
+          <span class="stack" aria-hidden="true">
+            <i><svg viewBox="0 0 24 24" fill="#f97316"><path d="M12 2l1.8 5.6L19 9l-4.6 3.4L15.6 18 12 14.8 8.4 18l1.2-5.6L5 9l5.2-1.4z"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="#1d1d1f"><path d="M12 3l8 4.6v8.8L12 21l-8-4.6V7.6z"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="#1d1d1f" stroke-width="2.2"><path d="M9 15c-2 2-4 0-2-2l4-4c2-2 4 0 2 2"/><path d="M15 9c2-2 4 0 2 2l-4 4c-2 2-4 0-2-2"/></svg></i>
+          </span>
+          <span class="lbl"><span id="copylabel">Copy prompt</span></span>
+          <span class="sweep" aria-hidden="true"></span>
+        </button>
+        <p class="demo-note">点一下：光扫过的同时换字。原作 <a href="https://x.com/kippe07/status/2122278471090966873" target="_blank" rel="noopener">Petar Cirkovic</a>，收录于 <a href="https://cantrip.cn/i/copy-prompt-sweep" target="_blank" rel="noopener">Cantrip</a></p>
+      </div>
 
-</main>
+      <div class="demo-block">
+        <div class="folders" id="folders">
+          <div class="folder" style="--tone:#cfd3da; --tone2:#9aa3b0" tabindex="0" role="button" aria-label="打开 Smoke">
+            <div class="sheets">
+              <div class="sheet" style="--tone:#b9bfc9"></div>
+              <div class="sheet" style="--tone:#d7dbe1"></div>
+              <div class="sheet" style="--tone:#a8b0bc"></div>
+            </div>
+            <div class="cover"><b>Smoke</b></div>
+          </div>
+          <div class="folder" style="--tone:#f3c9a0; --tone2:#e59a5f" tabindex="0" role="button" aria-label="打开 Warm light">
+            <div class="sheets">
+              <div class="sheet" style="--tone:#f0b98b"></div>
+              <div class="sheet" style="--tone:#f7d6b4"></div>
+              <div class="sheet" style="--tone:#e2a06a"></div>
+            </div>
+            <div class="cover"><b>Warm light</b></div>
+          </div>
+          <div class="folder" style="--tone:#5d6472; --tone2:#3a4150" tabindex="0" role="button" aria-label="打开 After dark">
+            <div class="sheets">
+              <div class="sheet" style="--tone:#4e5563"></div>
+              <div class="sheet" style="--tone:#656d7c"></div>
+              <div class="sheet" style="--tone:#3b4250"></div>
+            </div>
+            <div class="cover"><b>After dark</b></div>
+          </div>
+        </div>
+        <p class="demo-note">点开像翻书：封面翻到左边，指到哪张哪张浮起来。原作 <a href="https://x.com/sucodeee/status/2117957702345527378" target="_blank" rel="noopener">sucodee</a>，收录于 <a href="https://cantrip.cn/i/glass-photo-folders" target="_blank" rel="noopener">Cantrip</a></p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>个人项目，只在小米 17 Pro 上验证过。<br>
+    反馈：App 内「设置 → 反馈」，或邮件 <a href="mailto:i@lingluandf.online">i@lingluandf.online</a></p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var btn = document.getElementById('copybtn');
+  var label = document.getElementById('copylabel');
+  if (btn && label) {
+    var timer = null;
+    btn.addEventListener('click', function () {
+      if (btn.classList.contains('sweeping')) return;
+      btn.classList.add('sweeping');
+      // 光带走到中间（约 260ms）时换字：这一下正好被光盖住
+      setTimeout(function () { label.textContent = 'Copied!'; btn.classList.add('copied'); }, 260);
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        label.textContent = 'Copy prompt';
+        btn.classList.remove('copied');
+        setTimeout(function () { btn.classList.remove('sweeping'); }, 120);
+      }, 1600);
+    });
+  }
+
+  var folders = document.querySelectorAll('#folders .folder');
+  folders.forEach(function (folder) {
+    function toggle() { folder.classList.toggle('open'); }
+    folder.addEventListener('click', function (e) {
+      if (e.target.closest('.sheet')) return;
+      toggle();
+    });
+    folder.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+  });
+})();
+</script>
 </body>
 </html>
