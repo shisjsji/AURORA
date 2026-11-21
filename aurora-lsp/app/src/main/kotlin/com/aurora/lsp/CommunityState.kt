@@ -45,19 +45,27 @@ class CommunityState(val auth: AuthState) {
         if (feedStatus == FeedStatus.Loading) return
         feedStatus = FeedStatus.Loading
         error = null
-        when (val result = Community.feed(token)) {
-            is Community.Result.Ok -> {
-                feed = result.value.items
-                nextCursor = result.value.nextCursor
-                feedStatus = if (result.value.items.isEmpty()) FeedStatus.Empty else FeedStatus.Ready
+        try {
+            when (val result = Community.feed(token)) {
+                is Community.Result.Ok -> {
+                    feed = result.value.items
+                    nextCursor = result.value.nextCursor
+                    feedStatus = if (result.value.items.isEmpty()) FeedStatus.Empty else FeedStatus.Ready
+                }
+                is Community.Result.Denied -> {
+                    feedStatus = if (feed.isEmpty()) FeedStatus.Offline else FeedStatus.Ready
+                    error = "服务器拒绝了请求（" + result.code + "），稍后再试。"
+                }
+                is Community.Result.Failed -> {
+                    feedStatus = if (feed.isEmpty()) FeedStatus.Offline else FeedStatus.Ready
+                    error = null
+                }
             }
-            is Community.Result.Denied -> {
+        } finally {
+            // Swiping away cancels this coroutine. Without the reset the page stays on Loading
+            // forever: the guard above then blocks every retry and only a force stop recovers.
+            if (feedStatus == FeedStatus.Loading) {
                 feedStatus = if (feed.isEmpty()) FeedStatus.Offline else FeedStatus.Ready
-                error = "服务器拒绝了请求（" + result.code + "），稍后再试。"
-            }
-            is Community.Result.Failed -> {
-                feedStatus = if (feed.isEmpty()) FeedStatus.Offline else FeedStatus.Ready
-                error = null
             }
         }
     }
@@ -111,23 +119,22 @@ class CommunityState(val auth: AuthState) {
         }
     }
 
-    suspend fun toggleLike(item: Community.Item): Boolean = withContext(Dispatchers.IO) {
-        val current = token ?: return@withContext false
+    suspend fun toggleLike(item: Community.Item): Boolean {
+        val current = token ?: return false
         val target = !item.liked
-        when (val result = Community.like(item.id, current, target)) {
-            is Community.Result.Ok -> {
-                fun patch(list: List<Community.Item>) = list.map {
-                    if (it.id == item.id) {
-                        it.copy(liked = target, likes = (it.likes + if (target) 1 else -1).coerceAtLeast(0))
-                    } else it
-                }
-                feed = patch(feed)
-                myPosts = patch(myPosts)
-                myLikes = if (target) myLikes else myLikes.filterNot { it.id == item.id }
-                true
-            }
-            else -> false
+        // Only the network call goes to IO: patching the three lists on an IO thread used to
+        // let two taps race on the same snapshot, so one of them was silently lost.
+        val result = withContext(Dispatchers.IO) { Community.like(item.id, current, target) }
+        if (result !is Community.Result.Ok) return false
+        fun patch(list: List<Community.Item>) = list.map {
+            if (it.id == item.id) {
+                it.copy(liked = target, likes = (it.likes + if (target) 1 else -1).coerceAtLeast(0))
+            } else it
         }
+        feed = patch(feed)
+        myPosts = patch(myPosts)
+        myLikes = if (target) myLikes else myLikes.filterNot { it.id == item.id }
+        return true
     }
 
     suspend fun publish(

@@ -836,7 +836,9 @@ private fun TonePage(
                     },
                     trailing = { CheckMark(selected) },
                     onClick = {
-                        scope.launch { state.update(newCurve = preset.curve, newPreset = "custom") }
+                        scope.launch {
+                            state.update(newCurve = preset.curve, newPreset = "custom", rememberCurve = false)
+                        }
                     }
                 )
             }

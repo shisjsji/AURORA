@@ -6,6 +6,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -179,7 +181,10 @@ class AuroraState(private val context: Context) {
         applied = raw.applied.orEmpty().let { if (it == "null") "" else it }
 
         val stored = parseCurve(raw.geq)
-        curve = stored ?: Presets.curve(Presets.indexOf(preset)).copyOf()
+        val nextCurve = stored ?: Presets.curve(Presets.indexOf(preset)).copyOf()
+        // Same array contents must not count as change: this runs every two seconds, and a fresh
+        // instance each tick resets any in-page draft keyed on the array.
+        if (!curve.contentEquals(nextCurve)) curve = nextCurve
         if (stored != null) preset = "custom"
         savedCurve = parseCurve(raw.geqSaved)
         actualBands = parseCurve(raw.bands)
@@ -238,11 +243,27 @@ class AuroraState(private val context: Context) {
         null
     }
 
+    /** Writes are serialised: two quick taps used to land in whatever order `su` finished. */
+    private val writeLock = Mutex()
+
     suspend fun update(
         newEnabled: Boolean = enabled,
         newPreset: String = preset,
         newStrength: Int = strength,
-        newCurve: FloatArray? = null
+        newCurve: FloatArray? = null,
+        // Only a hand-edited curve may replace the "restore saved curve" slot. Picking one of the
+        // user's own presets also travels as newCurve, but it must not overwrite that slot.
+        rememberCurve: Boolean = true
+    ) = writeLock.withLock {
+        updateLocked(newEnabled, newPreset, newStrength, newCurve, rememberCurve)
+    }
+
+    private suspend fun updateLocked(
+        newEnabled: Boolean,
+        newPreset: String,
+        newStrength: Int,
+        newCurve: FloatArray?,
+        rememberCurve: Boolean
     ) {
         saving = true
         error = null
@@ -270,8 +291,10 @@ class AuroraState(private val context: Context) {
                 // Keep a copy in the saved slot, so switching presets later cannot lose it. Only a
                 // hand-edited curve reaches this branch; restoring a preset writes no custom curve
                 // at all, so the saved slot is never replaced by one.
-                append(" && settings put global ")
-                    .append(AuroraEngine.K_GEQ_SAVED).append(' ').append(encoded)
+                if (rememberCurve) {
+                    append(" && settings put global ")
+                        .append(AuroraEngine.K_GEQ_SAVED).append(' ').append(encoded)
+                }
             } else {
                 append(" && settings delete global ").append(AuroraEngine.K_GEQ)
             }
@@ -296,7 +319,7 @@ class AuroraState(private val context: Context) {
         preset = if (isCustom) "custom" else safePreset
         strength = newStrength
         curve = targetCurve
-        if (isCustom) savedCurve = targetCurve
+        if (isCustom && rememberCurve) savedCurve = targetCurve
         refresh()
     }
 
@@ -434,7 +457,14 @@ class AuroraState(private val context: Context) {
     }
 
     suspend fun deletePreset(id: String) {
+        val removed = userPresets.firstOrNull { it.id == id }
         commit(AuroraEngine.K_USER_PRESETS, presetsToJson(userPresets.filterNot { it.id == id }))
+        // Deleting the curve that is currently playing would drop the sound to the flat preset
+        // two seconds later, with no explanation. Switch it explicitly and say so.
+        if (removed != null && removed.curve.contentEquals(curve)) {
+            update(newPreset = "flat")
+            error = "已删除正在使用的预设，声音已切回原厂平直。"
+        }
         // Assignments pointing at the removed preset would silently fall back; clear them now.
         val cleaned = appMap.filterNot { it.value == id }
         if (cleaned.size != appMap.size) {

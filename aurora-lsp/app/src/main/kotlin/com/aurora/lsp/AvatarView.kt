@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import java.util.concurrent.ConcurrentHashMap
 import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -42,7 +43,7 @@ internal fun avatarImageUrl(avatar: String): String? =
 /** Small enough to hold in memory: these are 512×512 JPEGs, a few dozen KB each. */
 private val avatarCache = LruCache<String, ImageBitmap>(48)
 /** URLs that failed once and when they may be tried again; a dropped packet is not a dead image. */
-private val avatarRetryAt = HashMap<String, Long>()
+private val avatarRetryAt = ConcurrentHashMap<String, Long>()
 private const val RETRY_AFTER_MS = 30_000L
 
 /** 交给系统调度用：内存吃紧时整层清掉，磁盘缓存还在，回来时重新解码。 */

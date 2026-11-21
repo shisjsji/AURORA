@@ -169,6 +169,26 @@ function rateLimited(ip, limit = MAX_PER_WINDOW, windowMs = WINDOW_MS) {
   return record.count > limit;
 }
 
+// 发信额度是全局的，不是每 IP 的：SMTP 服务商的每小时配额一撞上，所有用户都收不到验证码。
+// 队列把并发压成串行，避免同一个瞬间开十几条 TLS 连接被服务商限流。
+const MAIL_PER_HOUR = 80;
+let mailWindow = { start: Date.now(), count: 0 };
+let mailQueue = Promise.resolve();
+
+function takeMailSlot() {
+  const now = Date.now();
+  if (now - mailWindow.start > 3600 * 1000) mailWindow = { start: now, count: 0 };
+  if (mailWindow.count >= MAIL_PER_HOUR) return false;
+  mailWindow.count += 1;
+  return true;
+}
+
+function sendCodeQueued(email, code) {
+  const run = mailQueue.then(() => sendCode(email, code), () => sendCode(email, code));
+  mailQueue = run.catch(() => {});
+  return run;
+}
+
 function reply(res, code, payload) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(payload));
@@ -193,6 +213,18 @@ function validCurve(curve) {
 
 function curveIsFlat(joined) {
   return joined.split(',').every((value) => Math.abs(Number(value)) <= FLAT_LIMIT);
+}
+
+// 每账号的写入额度。没有它，一个账号按 IP 限额连发就能把公共 feed 或某条曲线的评论区
+// 永久占死：feed 只看最新 20 条，评论区只取最早 200 条。
+function overQuota(table, accountId, hourCap, dayCap) {
+  const now = Date.now();
+  const hour = db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE account_id = ? AND created_at > ?`)
+    .get(accountId, now - 3600 * 1000).c;
+  if (hour >= hourCap) return true;
+  const day = db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE account_id = ? AND created_at > ?`)
+    .get(accountId, now - 86400 * 1000).c;
+  return day >= dayCap;
 }
 
 function normalizeEmail(input) {
@@ -444,7 +476,8 @@ WHERE p.hidden = 0 AND a.banned_at IS NULL`;
 function adoptLegacy(account, anonId) {
   const legacy = db.prepare('SELECT * FROM accounts WHERE anon_id = ?').get(anonId);
   if (!legacy || legacy.id === account.id) return account;
-  if (legacy.email) return account; // 那个句柄已经是别人的登录账号，不能抢
+  // 被封禁的旧句柄不能被新邮箱洗白：内容会随迁移回到公开 feed，封禁记录也会跟着那行一起被删掉。
+  if (legacy.email || legacy.banned_at) return account;
 
   db.exec('BEGIN');
   try {
@@ -639,6 +672,14 @@ function handle(req, res, route, url, body) {
     const day = dayKey(now);
     const sentToday = row && row.sent_day === day ? row.sent_count : 0;
     if (sentToday >= CODE_PER_DAY) return reply(res, 429, { ok: false, error: 'dailyLimit' });
+    // 全局发信额度用完就直接拒绝：继续发只会把 SMTP 配额打爆，让所有人一起登不进来。
+    if (!takeMailSlot()) {
+      return reply(res, 429, {
+        ok: false,
+        error: 'mailBusy',
+        message: '发信太频繁，请稍后再试。',
+      });
+    }
 
     const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
     db.prepare(
@@ -650,7 +691,7 @@ function handle(req, res, route, url, body) {
     // 顺手清掉过期行，不用另设定时任务。
     db.prepare('DELETE FROM codes WHERE expires_at < ?').run(now);
 
-    sendCode(email, code)
+    sendCodeQueued(email, code)
       .then(() => reply(res, 200, { ok: true, ttl: CODE_TTL_MS / 1000, resendIn: CODE_RESEND_MS / 1000 }))
       .catch((error) => {
         console.error('sendCode failed:', error && error.message);
@@ -797,9 +838,14 @@ function handle(req, res, route, url, body) {
     const row = db.prepare(`${FEED_SQL} AND p.id = ?`).get(id);
     if (!row) return reply(res, 404, { ok: false, error: 'not found' });
     const comments = db.prepare(
-      `SELECT c.*, a.nickname, a.avatar FROM comments c
-       JOIN accounts a ON a.id = c.account_id
-       WHERE c.preset_id = ? AND c.hidden = 0 ORDER BY c.id ASC LIMIT 200`
+      // 取最近 200 条再按时间正序展示：原来取最早 200 条，一条曲线被刷满之后，
+      // 之后所有人的真评论都进不了列表。被封账号的评论也一并挡住。
+      `SELECT * FROM (
+         SELECT c.*, a.nickname, a.avatar FROM comments c
+         JOIN accounts a ON a.id = c.account_id
+         WHERE c.preset_id = ? AND c.hidden = 0 AND a.banned_at IS NULL
+         ORDER BY c.id DESC LIMIT 200
+       ) ORDER BY id ASC`
     ).all(id);
     const out = card(row, viewer ? viewer.id : undefined);
     out.commentList = comments.map((c) => ({
@@ -856,6 +902,9 @@ function handle(req, res, route, url, body) {
     if (curveIsFlat(curve)) {
       return reply(res, 422, { ok: false, error: 'flat', message: '这条曲线所有频段都是 0，等于没调过，没必要发布。' });
     }
+    if (overQuota('presets', account.id, 5, 20)) {
+      return reply(res, 429, { ok: false, error: 'quota', message: '今天发布得有点多，歇一会儿再来。' });
+    }
     // 同一个人发同样的曲线没有任何意义，直接指向已有的那条。
     const duplicate = db.prepare(
       'SELECT id, name FROM presets WHERE account_id = ? AND curve = ? AND hidden = 0 ORDER BY id DESC LIMIT 1'
@@ -908,6 +957,9 @@ function handle(req, res, route, url, body) {
     if (!preset) return reply(res, 404, { ok: false, error: 'not found' });
     const commentBody = str(body.body, 140);
     if (!commentBody) return reply(res, 400, { ok: false, error: 'body required' });
+    if (overQuota('comments', account.id, 20, 100)) {
+      return reply(res, 429, { ok: false, error: 'quota', message: '评论太频繁，过一会儿再试。' });
+    }
     const result = db.prepare(
       'INSERT INTO comments (preset_id, account_id, body, created_at) VALUES (?, ?, ?, ?)'
     ).run(id, account.id, commentBody, Date.now());
