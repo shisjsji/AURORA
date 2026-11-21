@@ -223,6 +223,9 @@ internal fun AccountPanel(
 
     var nickname by remember(auth.nickname) { mutableStateOf(auth.nickname) }
     var chosen by remember(auth.avatar) { mutableStateOf(auth.avatar) }
+    // Only send an avatar when a built-in icon was actually tapped: an uploaded one is stored as
+    // "img:<file>", which the server refuses to accept back as an icon key.
+    var avatarTouched by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
     var confirmingDelete by remember { mutableStateOf(false) }
@@ -273,7 +276,7 @@ internal fun AccountPanel(
                 onClick = {
                     scope.launch {
                         busy = true
-                        note = if (auth.updateProfile(nickname.trim(), chosen)) {
+                        note = if (auth.updateProfile(nickname.trim(), if (avatarTouched) chosen else null)) {
                             community.refreshFeed()
                             "已保存。"
                         } else {
@@ -351,7 +354,10 @@ internal fun AccountPanel(
                                     if (selected) accent.copy(alpha = 0.18f)
                                     else colors.surfaceContainer
                                 )
-                                .clickable { chosen = choice.key },
+                                .clickable {
+                                    chosen = choice.key
+                                    avatarTouched = true
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -626,6 +632,7 @@ internal fun AccountHeaderCard(
     onOpenAccount: () -> Unit,
     onOpenLogin: () -> Unit,
     onOpenMyPosts: () -> Unit,
+    onOpenMyLikes: () -> Unit,
     onOpenAdmin: () -> Unit
 ) {
     val colors = MiuixTheme.colorScheme
@@ -669,12 +676,17 @@ internal fun AccountHeaderCard(
                 trailing = { ValueText("管理") },
                 onClick = onOpenMyPosts
             )
+            RowDivider()
+            AuroraRow(
+                title = "我的喜欢",
+                trailing = { ValueText("查看") },
+                onClick = onOpenMyLikes
+            )
         }
         if (auth.isAdmin) {
             RowDivider()
             AuroraRow(
                 title = "社区管理",
-                summary = "封禁账号、删除内容",
                 trailing = { ValueText("进入", accent = true) },
                 onClick = onOpenAdmin
             )

@@ -29,11 +29,10 @@ import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * Moderation, in one place: who is here, what they published, and the two levers that matter.
+ * Moderation: who is here, and what is published.
  *
- * <p>Everything on this screen is an admin action, so both destructive ones (ban, delete) ask once
- * and then say what happened. Content decisions stay where the content is - this is for the cases
- * the feed cannot reach: a user who keeps posting, or a curve that has to go regardless of author.
+ * <p>Two lists, nothing else. Each row carries one line of identity and one action, so a scan down
+ * the page answers "who is a problem" without reading sentences. Destructive actions ask once.
  */
 @Composable
 internal fun AdminPanel(
@@ -68,49 +67,47 @@ internal fun AdminPanel(
         actions = { PanelButton("关闭", dark, true, Modifier.weight(1f), onDismiss) }
     ) {
         PanelCard(dark) {
-            Text("找用户", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = ink)
+            OutlinedTextField(
+                value = query,
+                onValueChange = { if (it.length <= 64) query = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("邮箱或昵称", fontSize = 13.sp, color = muted) },
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = ink),
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = accent,
+                    unfocusedBorderColor = if (dark) Color(0xFF33383F) else Color(0xFFE2E6EC),
+                    cursorColor = accent
+                )
+            )
             Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { if (it.length <= 64) query = it },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    placeholder = { Text("邮箱或昵称", fontSize = 13.sp, color = muted) },
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = ink),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = accent,
-                        unfocusedBorderColor = if (dark) Color(0xFF33383F) else Color(0xFFE2E6EC),
-                        cursorColor = accent
-                    )
-                )
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    "搜索",
-                    fontSize = 13.sp,
-                    color = accent,
-                    modifier = Modifier
-                        .clickable(enabled = !busy) {
-                            scope.launch { community.refreshAdminUsers(query.trim()) }
-                        }
-                        .padding(vertical = 6.dp)
-                )
-            }
+            Text(
+                "搜索",
+                fontSize = 13.sp,
+                color = accent,
+                modifier = Modifier
+                    .clickable(enabled = !busy) {
+                        scope.launch { community.refreshAdminUsers(query.trim()) }
+                    }
+                    .padding(vertical = 6.dp)
+            )
         }
 
+        SectionLabel("用户", muted)
         when (community.adminUsersStatus) {
             CommunityState.FeedStatus.Loading -> PanelCard(dark) {
                 Text("正在读取…", fontSize = 12.sp, color = muted)
             }
             CommunityState.FeedStatus.Offline -> PanelCard(dark) {
-                Text("连不上社区服务器。", fontSize = 12.sp, color = muted)
+                Text("连不上服务器", fontSize = 12.sp, color = muted)
             }
             else -> community.adminUsers.forEach { user ->
+                val isSelf = user.email.isNotBlank() && user.email == auth.email
                 PanelCard(dark) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        AvatarBadge(user.avatar, 34.dp)
-                        Spacer(Modifier.width(12.dp))
+                        AvatarBadge(user.avatar, 28.dp)
+                        Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
@@ -119,129 +116,111 @@ internal fun AdminPanel(
                                     fontWeight = FontWeight.Medium,
                                     color = ink
                                 )
-                                if (user.role == "admin") {
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("管理员", fontSize = 10.sp, color = accent)
+                                val badge = when {
+                                    isSelf -> "你"
+                                    user.role == "admin" -> "管理员"
+                                    user.banned -> "已封禁"
+                                    else -> ""
                                 }
-                                if (user.banned) {
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("已封禁", fontSize = 10.sp, color = colors.error)
+                                if (badge.isNotEmpty()) {
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        badge,
+                                        fontSize = 10.sp,
+                                        color = when {
+                                            user.banned && !isSelf -> colors.error
+                                            else -> muted
+                                        }
+                                    )
                                 }
                             }
-                            Spacer(Modifier.height(3.dp))
-                            Text(user.email.ifBlank { "—" }, fontSize = 11.sp, color = muted)
-                            Spacer(Modifier.height(2.dp))
                             Text(
-                                "曲线 " + user.presets + " · 评论 " + user.comments,
+                                user.email.ifBlank { "无账号" },
                                 fontSize = 11.sp,
                                 color = muted
                             )
                         }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    // 自己这一行没有动作可做：封禁自己会把自己锁在外面，角色也不该自己改自己。
-                    val isSelf = user.email.isNotBlank() && user.email == auth.email
-                    if (isSelf) {
-                        Text("这是你自己的账号", fontSize = 11.sp, color = muted)
-                    } else {
-                        Row {
-                        Text(
-                            if (user.banned) "解封" else "封禁",
-                            fontSize = 13.sp,
-                            color = if (user.banned) accent else colors.error,
-                            modifier = Modifier
-                                .clickable(enabled = !busy && user.id != 0) {
-                                    if (user.banned) {
+                        if (!isSelf) {
+                            Text(
+                                if (user.banned) "解封" else "封禁",
+                                fontSize = 13.sp,
+                                color = if (user.banned) accent else colors.error,
+                                modifier = Modifier
+                                    .clickable(enabled = !busy) {
+                                        if (user.banned) {
+                                            scope.launch {
+                                                busy = true
+                                                note = if (community.unbanUser(user.id)) {
+                                                    "已解封 " + user.nickname
+                                                } else community.error
+                                                busy = false
+                                            }
+                                        } else {
+                                            pendingBan = user
+                                        }
+                                    }
+                                    .padding(vertical = 6.dp, horizontal = 4.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                if (user.role == "admin") "取消管理" else "设为管理",
+                                fontSize = 13.sp,
+                                color = muted,
+                                modifier = Modifier
+                                    .clickable(enabled = !busy) {
                                         scope.launch {
                                             busy = true
-                                            note = if (community.unbanUser(user.id)) {
-                                                "已解封 " + user.nickname
+                                            val role = if (user.role == "admin") "user" else "admin"
+                                            note = if (community.setRole(user.id, role)) {
+                                                if (role == "admin") "已设为管理员" else "已取消管理员"
                                             } else community.error
                                             busy = false
                                         }
-                                    } else {
-                                        pendingBan = user
                                     }
-                                }
-                                .padding(vertical = 6.dp, horizontal = 2.dp)
-                        )
-                        Spacer(Modifier.width(18.dp))
-                        Text(
-                            if (user.role == "admin") "取消管理员" else "设为管理员",
-                            fontSize = 13.sp,
-                            color = muted,
-                            modifier = Modifier
-                                .clickable(enabled = !busy && user.id != 0) {
-                                    scope.launch {
-                                        busy = true
-                                        val role = if (user.role == "admin") "user" else "admin"
-                                        note = if (community.setRole(user.id, role)) {
-                                            if (role == "admin") "已设为管理员" else "已取消管理员"
-                                        } else community.error
-                                        busy = false
-                                    }
-                                }
-                                .padding(vertical = 6.dp, horizontal = 2.dp)
-                        )
-                    }
-                    }
-                    if (user.banned && user.banReason.isNotBlank()) {
-                        Text("原因：" + user.banReason, fontSize = 11.sp, color = muted)
+                                    .padding(vertical = 6.dp, horizontal = 4.dp)
+                            )
+                        }
                     }
                 }
             }
         }
 
-        PanelCard(dark) {
-            Text("最近的曲线", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = ink)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "管理删的是内容，不是账号。删掉之后评论和喜欢一起清空。",
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                color = muted
-            )
-        }
-
+        SectionLabel("内容", muted)
         when (community.adminPresetsStatus) {
             CommunityState.FeedStatus.Loading -> PanelCard(dark) {
                 Text("正在读取…", fontSize = 12.sp, color = muted)
             }
             CommunityState.FeedStatus.Offline -> PanelCard(dark) {
-                Text("连不上社区服务器。", fontSize = 12.sp, color = muted)
+                Text("连不上服务器", fontSize = 12.sp, color = muted)
             }
             CommunityState.FeedStatus.Empty -> PanelCard(dark) {
-                Text("社区里还没有曲线。", fontSize = 12.sp, color = muted)
+                Text("还没有曲线", fontSize = 12.sp, color = muted)
             }
             else -> community.adminPresets.forEach { item ->
                 PanelCard(dark) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        EqGlyph(item.curve, Modifier.width(44.dp), accent, height = 28.dp)
-                        Spacer(Modifier.width(12.dp))
+                        EqGlyph(item.curve, Modifier.width(40.dp), accent, height = 26.dp)
+                        Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(item.name, fontSize = 14.sp, color = ink)
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                item.nickname + " · 喜欢 " + item.likes + " · 评论 " + item.comments,
-                                fontSize = 11.sp,
-                                color = muted
-                            )
+                            Text(item.nickname, fontSize = 11.sp, color = muted)
                         }
                         Text(
                             "查看",
                             fontSize = 13.sp,
-                            color = accent,
+                            color = muted,
                             modifier = Modifier
                                 .clickable { onOpenDetail(item) }
-                                .padding(vertical = 6.dp, horizontal = 6.dp)
+                                .padding(vertical = 6.dp, horizontal = 4.dp)
                         )
+                        Spacer(Modifier.width(8.dp))
                         Text(
                             "删除",
                             fontSize = 13.sp,
                             color = colors.error,
                             modifier = Modifier
                                 .clickable(enabled = !busy) { pendingDelete = item }
-                                .padding(vertical = 6.dp, horizontal = 6.dp)
+                                .padding(vertical = 6.dp, horizontal = 4.dp)
                         )
                     }
                 }
@@ -250,16 +229,15 @@ internal fun AdminPanel(
 
         note?.let { message ->
             PanelCard(dark) {
-                Text(message, fontSize = 12.sp, lineHeight = 18.sp, color = muted)
+                Text(message, fontSize = 12.sp, color = muted)
             }
         }
     }
 
     pendingBan?.let { target ->
         ConfirmBox(
-            title = "封禁「" + target.nickname + "」？",
-            body = "封禁后这个人不能登录、不能发布和评论，已发布的曲线会从社区列表里下架。" +
-                "曲线和评论本身不会删除，解封后恢复。",
+            title = "封禁「" + target.nickname + "」",
+            body = "不能登录、不能发布和评论，已发布的曲线从社区下架。解封后恢复。",
             confirmLabel = "封禁",
             onConfirm = {
                 pendingBan = null
@@ -277,18 +255,29 @@ internal fun AdminPanel(
 
     pendingDelete?.let { item ->
         ConfirmBox(
-            title = "删除「" + item.name + "」？",
-            body = "这条曲线和它下面的评论会一起删除，作者也拿不回来。",
+            title = "删除「" + item.name + "」",
+            body = "曲线和它下面的评论一起删除，作者也拿不回来。",
             confirmLabel = "删除",
             onConfirm = {
                 pendingDelete = null
                 scope.launch {
                     busy = true
-                    note = if (community.deletePost(item)) "已删除。" else community.error
+                    note = if (community.deletePost(item)) "已删除" else community.error
                     busy = false
                 }
             },
             onDismiss = { pendingDelete = null }
         )
     }
+}
+
+/** A short heading between blocks inside a panel. */
+@Composable
+private fun SectionLabel(text: String, color: Color) {
+    Text(
+        text,
+        fontSize = 12.sp,
+        color = color,
+        modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp)
+    )
 }

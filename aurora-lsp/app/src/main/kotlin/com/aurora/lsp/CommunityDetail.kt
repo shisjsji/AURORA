@@ -112,7 +112,7 @@ internal fun CommunityDetailPanel(
                         // install happened to have dialled in.
                         state.setStrength(100)
                         saving = false
-                        saveNote = "已保存，强度已设为 100%。去「均衡」页的“我的预设”里就能找到它。"
+                        saveNote = "已保存，强度 100%"
                     }
                 }
             )

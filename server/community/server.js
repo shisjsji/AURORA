@@ -538,7 +538,8 @@ function handleAvatarUpload(req, res, buffer) {
 // ---- HTTP ---------------------------------------------------------------
 
 const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && (req.url || '').split('?')[0] === '/health') {
+  const rawRoute = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
+  if (req.method === 'GET' && rawRoute === '/health') {
     return reply(res, 200, { ok: true, mail: Boolean(mailConfig) || MAIL_STDOUT });
   }
   if (!['POST', 'GET', 'DELETE', 'PATCH'].includes(req.method)) {
@@ -546,8 +547,10 @@ const server = http.createServer((req, res) => {
     return res.end('method not allowed');
   }
 
+  // 头像图片是普通静态读，不是可写接口：算进限流等于让一屏二十张头像把接口额度吃光。
+  const countable = !rawRoute.startsWith('/avatars/');
   const ip = req.headers['x-real-ip'] || req.socket.remoteAddress || 'unknown';
-  if (rateLimited(ip)) {
+  if (countable && rateLimited(ip)) {
     res.writeHead(429, { 'Content-Type': 'text/plain' });
     return res.end('too many requests');
   }
@@ -555,7 +558,6 @@ const server = http.createServer((req, res) => {
   let size = 0;
   const chunks = [];
   // 头像上传是二进制，不能走 JSON 解析：先看路由，再决定怎么读体。
-  const rawRoute = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
   const isAvatarUpload = req.method === 'POST' && rawRoute === '/me/avatar';
   const bodyLimit = isAvatarUpload ? AVATAR_MAX : MAX_BODY;
   req.on('data', (chunk) => {
@@ -615,6 +617,9 @@ function handle(req, res, route, url, body) {
       res.writeHead(200, {
         'Content-Type': avatarMatch[2] === 'png' ? 'image/png' : 'image/jpeg',
         'Content-Length': data.length,
+        // 不解码上传内容，所以必须明确告诉浏览器不要嗅探类型。
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': 'inline',
         'Cache-Control': 'public, max-age=604800',
       });
       res.end(data);

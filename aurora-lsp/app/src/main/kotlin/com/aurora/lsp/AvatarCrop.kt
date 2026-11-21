@@ -105,7 +105,7 @@ internal fun AvatarCropPanel(
     PanelScaffold(
         dark = dark,
         title = "裁头像",
-        subtitle = "拖动调整位置，双指缩放。圆里的部分就是别人看到的头像。",
+        subtitle = "拖动定位，双指缩放",
         onBack = onCancel,
         actions = {
             PanelButton("取消", dark, false, Modifier.weight(1f), onCancel)
@@ -154,13 +154,13 @@ internal fun AvatarCropPanel(
                 }
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    "原图 " + source.width + "×" + source.height + "，输出 " + AVATAR_OUTPUT + "×" + AVATAR_OUTPUT,
+                    "原图 " + source.width + "×" + source.height,
                     fontSize = 11.sp,
                     color = muted
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "上传到社区后，任何登录的人都能看到这张图。",
+                    "上传后所有人可见。",
                     fontSize = 11.sp,
                     color = ink.copy(alpha = 0.6f)
                 )

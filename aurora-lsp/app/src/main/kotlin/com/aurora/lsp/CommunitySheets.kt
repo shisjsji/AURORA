@@ -66,7 +66,7 @@ internal fun ShareSheet(
     PanelScaffold(
         dark = dark,
         title = "分享到社区",
-        subtitle = "曲线会带着机型（" + deviceLabel + "）发布，别人按机型判断参考价值。",
+        subtitle = deviceLabel,
         onBack = onDismiss,
         actions = {
             if (published) {
@@ -132,7 +132,7 @@ internal fun ShareSheet(
                 Text("这条曲线没有改过", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = ink)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "六个频段都在 ±0.5 dB 以内，等于原厂平直。先调出你自己的声音再发，别人点开才不会看到一条直线。",
+                    "六个频段都在 ±0.5 dB 内，等于原厂平直。",
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
                     color = muted
@@ -143,7 +143,7 @@ internal fun ShareSheet(
         if (!signedIn) {
             PanelCard(dark) {
                 Text(
-                    "发布需要先登录：没有账号的曲线没法归属，也没法删。",
+                    "发布需要登录",
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
                     color = muted

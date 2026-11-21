@@ -750,7 +750,7 @@ private fun TonePage(
         AuroraGroup {
             AuroraRow(
                 title = "叠加调音",
-                summary = if (state.enabled) "已开启，曲线正挂在播放中的会话上" else "已关闭，音频走原厂链路",
+                summary = if (state.enabled) "已开启" else "已关闭",
                 trailing = {
                     Switch(
                         checked = state.enabled,
@@ -1500,6 +1500,7 @@ private fun SettingsPage(
                 onOpenAccount = onOpenAccount,
                 onOpenLogin = onOpenLogin,
                 onOpenMyPosts = onOpenMyPosts,
+                onOpenMyLikes = onOpenMyLikes,
                 onOpenAdmin = onOpenAdmin
             )
 
@@ -1512,12 +1513,10 @@ private fun SettingsPage(
                     if (index > 0) RowDivider()
                     SelectRow(label, ui.themeMode == key, dark) { ui.setTheme(key) }
                 }
-            }
-
-            AuroraGroup("主题") {
+                RowDivider()
                 EntryRow(
-                    title = "管理主题",
-                    detail = "当前：" + AuroraPalette.nameOf(AuroraPalette.currentId),
+                    title = "主题",
+                    detail = AuroraPalette.nameOf(AuroraPalette.currentId),
                     action = "选择",
                     dark = dark,
                     onClick = onOpenThemes
@@ -1537,15 +1536,6 @@ private fun SettingsPage(
                     checked = ui.autoCheckUpdate,
                     dark = dark,
                     onChange = { ui.changeAutoCheckUpdate(it) }
-                )
-            }
-
-            AuroraGroup("社区") {
-                EntryRow(
-                    title = "我的喜欢",
-                    action = "查看",
-                    dark = dark,
-                    onClick = onOpenMyLikes
                 )
             }
 

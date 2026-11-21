@@ -116,12 +116,14 @@ class AuthState(private val prefs: SharedPreferences) {
         }
     }
 
-    suspend fun updateProfile(newNickname: String, newAvatar: String): Boolean {
+    /** Updates the profile. [newAvatar] is null when the picture was not touched: an uploaded avatar
+     is stored as "img:<file>", which the server rightly refuses to accept back as an icon key. */
+    suspend fun updateProfile(newNickname: String, newAvatar: String?): Boolean {
         val current = token ?: return false
         return when (val result = Community.updateProfile(current, newNickname.ifBlank { null }, newAvatar)) {
             is Community.Result.Ok -> {
                 nickname = result.value.nickname.ifBlank { newNickname }
-                avatar = result.value.avatar.ifBlank { newAvatar }
+                avatar = result.value.avatar.ifBlank { avatar }
                 persist()
                 error = null
                 true
