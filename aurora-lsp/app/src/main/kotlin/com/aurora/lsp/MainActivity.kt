@@ -38,6 +38,9 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -1712,8 +1715,13 @@ private fun UpdateDialog(
             Text(release.versionName, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = accent)
             if (release.notes.isNotEmpty()) {
                 Spacer(Modifier.height(10.dp))
+                // The release notes are a numbered list now, so the body has to scroll instead of
+                // being cut at a fixed length.
                 Text(
-                    release.notes.take(240),
+                    release.notes,
+                    modifier = Modifier
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState()),
                     fontSize = 13.sp,
                     lineHeight = 20.sp,
                     color = muted
