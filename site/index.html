@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AURORA · 按播放会话挂的六段均衡器</title>
+<meta name="description" content="AURORA 用 LSPosed 注入 system_server，给每个正在播放的会话挂一条六段曲线。不改系统文件，不重启音频服务，关掉即回原厂。">
+<meta name="theme-color" content="#101113">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23101113'/%3E%3Cg stroke='%23F2A5B8' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M8 20v-6M13 24V8M18 21v-9M23 18v-4'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #101113;
+    --surface: #17191B;
+    --hair: #26292C;
+    --hair-soft: #1E2124;
+    --ink: #ECE9E4;
+    --ink-2: #A9ABAE;
+    --ink-3: #8A8D91;
+    --accent: #F2A5B8;
+    --sans: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --gut: 20px;
+    --col: 660px;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.72;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1px;
+  }
+
+  ::selection { background: rgba(242, 165, 184, 0.28); color: #fff; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  a { color: var(--ink); }
+
+  .col { width: min(100% - var(--gut) * 2, var(--col)); margin: 0 auto; }
+
+  /* 顶栏 */
+  .bar {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(16, 17, 19, 0.9);
+    border-bottom: 1px solid var(--hair-soft);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  .bar-in {
+    height: 56px;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  }
+  .mark {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: 14px; letter-spacing: 0.16em; font-weight: 500;
+    text-decoration: none;
+  }
+  .mark svg { display: block; }
+  .bar a.get {
+    font-family: var(--mono); font-size: 13px;
+    color: var(--accent); text-decoration: none;
+    padding: 7px 13px; border: 1px solid rgba(242, 165, 184, 0.4); border-radius: 8px;
+  }
+  .bar a.get:hover { background: rgba(242, 165, 184, 0.08); }
+
+  /* 首屏 */
+  .hero { padding: 44px 0 0; }
+  h1 {
+    font-size: 30px; line-height: 1.28; font-weight: 600;
+    text-wrap: balance;
+    letter-spacing: -0.012em; margin: 0 0 18px; max-width: 20em;
+  }
+  .lede { font-size: 17px; color: var(--ink-2); margin: 0 0 26px; max-width: 30em; }
+  .lede b { color: var(--ink); font-weight: 500; }
+
+  .act { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 18px; }
+  .act .go {
+    display: inline-block; text-decoration: none;
+    background: var(--ink); color: #141517;
+    font-size: 16px; font-weight: 600;
+    padding: 13px 24px; border-radius: 12px;
+  }
+  .act .go:hover { background: #fff; }
+  .act .req { font-size: 13px; color: var(--ink-3); }
+
+  /* 六段刻度：全站唯一的签名细节，出现在这里一次 */
+  .bands { margin: 40px 0 0; }
+  .bands ul {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; justify-content: space-between;
+    border-top: 1px solid var(--hair);
+  }
+  .bands li {
+    position: relative; padding-top: 10px;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+  }
+  .bands li::before {
+    content: ""; position: absolute; top: -1px; left: 0;
+    width: 1px; height: 6px; background: var(--hair);
+  }
+
+  .shot {
+    display: block; width: 100%; height: auto;
+    border-radius: 18px; border: 1px solid var(--hair);
+    margin: 36px 0 0;
+  }
+
+  /* 章节 */
+  .block { padding: 56px 0 0; }
+  .block + .block { border-top: 1px solid var(--hair-soft); margin-top: 56px; }
+
+  h2 {
+    font-size: 22px; line-height: 1.4; font-weight: 600;
+    text-wrap: balance;
+    letter-spacing: -0.006em; margin: 0 0 16px;
+  }
+  .block p { color: var(--ink-2); margin: 0 0 16px; }
+  .block p:last-child { margin-bottom: 0; }
+  .block p b { color: var(--ink); font-weight: 500; }
+  code {
+    font-family: var(--mono); font-size: 0.88em;
+    color: var(--ink); background: var(--surface);
+    padding: 2px 6px; border-radius: 5px;
+  }
+
+  /* 安装步骤：真实顺序，所以有编号 */
+  ol.steps { list-style: none; margin: 8px 0 0; padding: 0; counter-reset: s; }
+  ol.steps li {
+    counter-increment: s;
+    position: relative;
+    padding: 14px 0 14px 38px;
+    border-bottom: 1px solid var(--hair-soft);
+    color: var(--ink-2);
+  }
+  ol.steps li:last-child { border-bottom: 0; }
+  ol.steps li::before {
+    content: counter(s);
+    position: absolute; left: 0; top: 14px;
+    width: 24px;
+    font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+  }
+  ol.steps li b { color: var(--ink); font-weight: 500; }
+
+  /* 预设：桌面是表，手机是一行一条 */
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 0; }
+  th {
+    text-align: left; font-size: 12px; font-weight: 400; color: var(--ink-3);
+    padding: 0 0 10px; border-bottom: 1px solid var(--hair);
+  }
+  th + th, td + td { padding-left: 14px; }
+  td {
+    padding: 13px 0; border-bottom: 1px solid var(--hair-soft);
+    font-size: 15px; color: var(--ink-2); vertical-align: top;
+  }
+  td:first-child { color: var(--ink); font-weight: 500; white-space: nowrap; }
+  td.n { font-family: var(--mono); font-size: 13px; color: var(--ink-3); white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+
+  dl.facts { margin: 8px 0 0; }
+  dl.facts div {
+    display: grid; grid-template-columns: 88px 1fr; gap: 12px;
+    padding: 13px 0; border-bottom: 1px solid var(--hair-soft);
+  }
+  dl.facts div:last-child { border-bottom: 0; }
+  dt { font-size: 13px; color: var(--ink-3); padding-top: 2px; }
+  dd { margin: 0; font-size: 15px; color: var(--ink-2); }
+
+  /* 更新日志 */
+  ul.log { list-style: none; margin: 8px 0 0; padding: 0; }
+  ul.log li { padding: 16px 0; border-bottom: 1px solid var(--hair-soft); }
+  ul.log li:last-child { border-bottom: 0; }
+  .row { display: flex; align-items: baseline; gap: 12px; }
+  .row .ver { font-family: var(--mono); font-size: 13px; color: var(--accent); }
+  .row .date { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+  ul.log p { margin: 6px 0 0; font-size: 15px; color: var(--ink-2); }
+
+  footer {
+    margin-top: 56px; padding: 24px 0 44px;
+    border-top: 1px solid var(--hair-soft);
+  }
+  footer p { margin: 0 0 8px; font-size: 13px; color: var(--ink-3); }
+  footer a { color: var(--ink-2); text-decoration: none; border-bottom: 1px solid var(--hair); }
+  footer a:hover { color: var(--ink); }
+
+  @media (min-width: 760px) {
+    :root { --gut: 32px; --col: 700px; }
+    .hero { padding-top: 72px; }
+    h1 { font-size: 44px; }
+    h2 { font-size: 26px; }
+    .block { padding-top: 88px; }
+    .block + .block { margin-top: 88px; }
+    .shot { margin-top: 48px; }
+    footer { margin-top: 88px; }
+  }
+
+  /* 桌面：文案在左，产品图在右并从底部延伸出去，避免一列居中显得空 */
+  @media (min-width: 980px) {
+    :root { --col: 1040px; }
+    .block, footer { max-width: 700px; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+      column-gap: 64px;
+      align-items: start;
+    }
+    .hero .shot { margin: 0; }
+  }
+
+  /* 一次性入场：主视觉从下方 8px 升起，指数缓出 */
+  @media (prefers-reduced-motion: no-preference) {
+    .hero .shot, .hero h1, .hero .lede, .hero .act {
+      animation: rise 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .hero .lede { animation-delay: 40ms; }
+    .hero .act { animation-delay: 80ms; }
+    .hero .shot { animation-delay: 140ms; }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
+    .act .go { transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1); }
+  }
+
+  @media (max-width: 560px) {
+    table thead { display: none; }
+    table tr { display: block; padding: 14px 0; border-bottom: 1px solid var(--hair-soft); }
+    table tr:last-child { border-bottom: 0; }
+    table td { display: block; padding: 0; border: 0; }
+    table td + td { padding-left: 0; }
+    table td.n { margin-top: 3px; }
+    table td:last-child { margin-top: 2px; color: var(--ink-3); font-size: 14px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div class="col bar-in">
+    <a class="mark" href="/">
+      <svg width="18" height="18" viewBox="0 0 32 32" aria-hidden="true">
+        <g stroke="#F2A5B8" stroke-width="2.4" stroke-linecap="round">
+          <path d="M8 21v-7M13 25V8M18 22v-10M23 19v-5"/>
+        </g>
+      </svg>
+      AURORA
+    </a>
+    <a class="get" href="/download/AURORA-1.3.3.apk">下载 1.3.3</a>
+  </div>
+</div>
+
+<main class="col">
+
+  <header class="hero">
+    <div class="hero-copy">
+    <h1>在系统均衡器上叠一条曲线</h1>
+    <p class="lede">
+      AURORA 用 LSPosed 注入 <b>system_server</b>，给每一个正在播放的会话挂一条六段曲线。
+      不改 <code>/odm</code> 里的 Dolby 配置，不重启 audioserver，不替换系统文件——关掉就回到原厂。
+    </p>
+    <div class="act">
+      <a class="go" href="/download/AURORA-1.3.3.apk">下载 APK</a>
+      <span class="req">需要 Root 与 LSPosed · 只在小米 17 系列验证过</span>
+    </div>
+
+    <div class="bands" aria-hidden="true">
+      <ul>
+        <li>80</li><li>200</li><li>500</li><li>1.5k</li><li>4k</li><li>10k</li>
+      </ul>
+    </div>
+    </div>
+
+    <img class="shot" src="/img/shot-tone.webp" width="720" height="1567"
+         alt="音效页：当前曲线、九个预设与开关">
+  </header>
+
+  <section class="block">
+    <h2>为什么是六段</h2>
+    <p>手机扬声器只在大约 300 Hz 到 6 kHz 之间能有效还原。往 47 Hz 或 12 kHz 堆增益，曲线好看，耳朵听不出来。</p>
+    <p>所以这里只做六个点：<code>80 / 200 / 500 / 1500 / 4000 / 10000 Hz</code>。每一段都落在你听得见的地方，单段范围 ±12 dB，抬升有 6 dB 上限，剩下的余量留给不削顶。</p>
+  </section>
+
+  <section class="block">
+    <h2>挂在会话上，不是挂在设备上</h2>
+    <p>系统一开空间音频，音乐就被换到独立的输出线程，全局混音上做的任何改动都会被绕过。这也是很多均衡器「装了没反应」的原因。</p>
+    <p>AURORA 按播放会话挂载，普通链路和空间音频链路都生效。没有会话在播放的时候，它什么都不做。</p>
+    <img class="shot" src="/img/shot-eq.webp" width="720" height="1567"
+         alt="均衡页：六段滑杆、声场宽度与感知响度" loading="lazy">
+  </section>
+
+  <section class="block">
+    <h2>九套曲线</h2>
+    <p>每套至少有一个频段相对平直偏 5 dB 以上，两两之间至少有一处差 4 dB。切换应该听得出来，听不出来就是没做好。</p>
+    <table>
+      <thead><tr><th>预设</th><th>曲线</th><th>听感</th></tr></thead>
+      <tbody>
+        <tr><td>原厂平直</td><td class="n">0 0 0 0 0 0</td><td>不叠加任何曲线</td></tr>
+        <tr><td>自然均衡</td><td class="n">+2 0 0 0 +1 +1</td><td>轻微抬一点厚度</td></tr>
+        <tr><td>哈曼卡顿</td><td class="n">+8 +2 −1 +1 +3 +2</td><td>流行与人声的默认选择</td></tr>
+        <tr><td>柏林之声</td><td class="n">+1 0 −1 +3 +6 +6</td><td>中高频打开，器乐分离</td></tr>
+        <tr><td>现场低频</td><td class="n">+10 +4 −2 +2 +4 +3</td><td>低频拉满，浑浊区让开</td></tr>
+        <tr><td>影院包围</td><td class="n">+8 +3 −2 0 +3 +2</td><td>下盘厚，极高频收</td></tr>
+        <tr><td>人声清晰</td><td class="n">−4 −2 +1 +6 +4 +1</td><td>主唱贴耳，背景后退</td></tr>
+        <tr><td>明亮解析</td><td class="n">−3 −1 0 +3 +7 +8</td><td>齿音与镲片跳出来</td></tr>
+        <tr><td>夜间柔化</td><td class="n">+5 0 0 −3 −4 −5</td><td>高频收敛，小音量不刺耳</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="block">
+    <h2>装上去要五步</h2>
+    <ol class="steps">
+      <li>确认设备已经用 KernelSU 或 Magisk 拿到 Root，并且装了 LSPosed。</li>
+      <li>安装 APK，<b>先打开一次</b>，让系统注册这个应用。</li>
+      <li>在 LSPosed 里启用 AURORA，作用域勾「系统」。</li>
+      <li>重启设备，让模块进入 system_server。</li>
+      <li>打开 App，开启「叠加调音」，播放任意音频就能听出区别。</li>
+    </ol>
+  </section>
+
+  <section class="block">
+    <h2>适用与限制</h2>
+    <dl class="facts">
+      <div><dt>机型</dt><dd>小米 17 系列（pandora / 25098PN5AC），澎湃 OS 4.0，Android 17</dd></div>
+      <div><dt>其它机型</dt><dd>没有验证过。诊断页会给出链路自检结果，可以用它判断能不能用。</dd></div>
+      <div><dt>不改什么</dt><dd>/odm 里的 Dolby 配置、persist.vendor.audio.* 属性、audioserver 进程、任何系统文件</dd></div>
+      <div><dt>会话切换</dt><dd>换歌时有两秒左右空窗，新会话被捡到之后才挂上曲线</dd></div>
+    </dl>
+  </section>
+
+  <section class="block" id="log">
+    <h2>更新日志</h2>
+    <ul class="log">
+      <li>
+        <div class="row"><span class="ver">1.3.3</span><span class="date">2026-11</span></div>
+        <p>社区页上线：匿名分享曲线、喜欢、短评论。诊断页降为二级入口，Dock 保持四格。</p>
+      </li>
+      <li>
+        <div class="row"><span class="ver">1.3.2</span><span class="date">2026-11</span></div>
+        <p>修复沉浸声路径的杂音：空间化会话的限幅器阈值下探 4 dB，补偿渲染器在限幅器下游的增益。</p>
+      </li>
+      <li>
+        <div class="row"><span class="ver">1.3.1</span><span class="date">2026-11</span></div>
+        <p>修复限幅器的反射构造签名——此前它从未生效，实际跑的是 AOSP 默认的 −2 dBFS 砖墙。新增设备适配包机制。</p>
+      </li>
+      <li>
+        <div class="row"><span class="ver">1.3.0</span><span class="date">2026-11</span></div>
+        <p>界面按四页重做，新增声场宽度与感知响度。</p>
+      </li>
+      <li>
+        <div class="row"><span class="ver">1.2.0</span><span class="date">2026-11</span></div>
+        <p>放弃 Dolby DAP，改驱动 AOSP 的 DynamicsProcessing；频段从二十段收成六段。</p>
+      </li>
+      <li>
+        <div class="row"><span class="ver">1.0.0</span><span class="date">2026-10</span></div>
+        <p>首个版本。</p>
+      </li>
+    </ul>
+  </section>
+
+  <footer>
+    <p>AURORA 是个人项目，不是商业产品。只在小米 17 Pro 上验证过，其它机型不保证能用。</p>
+    <p>问题与建议：App 内「设置 → 反馈」会带上日志，或发邮件到 <a href="mailto:i@lingluandf.online">i@lingluandf.online</a></p>
+    <p>界面组件参考 MIUIX 与 KernelSU（GPL-3.0），液态玻璃折射来自 AndroidLiquidGlass（Apache-2.0）。</p>
+  </footer>
+
+</main>
+</body>
+</html>
