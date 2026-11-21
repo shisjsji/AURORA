@@ -1553,17 +1553,18 @@ private fun SettingsPage(
 
             AuroraGroup("金标联盟") {
                 val ctx = androidx.compose.ui.platform.LocalContext.current
+                androidx.compose.foundation.Image(
+                    androidx.compose.ui.res.painterResource(com.aurora.audio.lsp.R.drawable.gold_banner),
+                    null,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(150.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(Space.card))
+                )
                 AuroraRow(
                     title = "已完成金标联盟适配",
                     summary = "内存、界面与系统行为均通过",
-                    leading = {
-                        androidx.compose.foundation.Image(
-                            androidx.compose.ui.res.painterResource(com.aurora.audio.lsp.R.drawable.badge_gold),
-                            null,
-                            modifier = Modifier.size(34.dp).clip(CircleShape)
-                        )
-                    },
-
                     onClick = {
                         runCatching {
                             ctx.startActivity(
