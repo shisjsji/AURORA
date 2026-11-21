@@ -117,6 +117,18 @@ import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * 内存吃紧时把头像的内存缓存交回去。社区一页几十张图，解码后才是大头；磁盘缓存还在，
+     * 回前台再解码即可。公平内存机制看的就是这种「要就给」的行为。
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= 20) {   // TRIM_MEMORY_UI_HIDDEN：界面已不可见
+            trimAvatarMemory()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // HyperOS 4 / Android 17 forces edge-to-edge, and setStatusBarColor /

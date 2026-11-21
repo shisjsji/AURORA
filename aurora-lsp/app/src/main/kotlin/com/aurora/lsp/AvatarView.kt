@@ -45,6 +45,11 @@ private val avatarCache = LruCache<String, ImageBitmap>(48)
 private val avatarRetryAt = HashMap<String, Long>()
 private const val RETRY_AFTER_MS = 30_000L
 
+/** 交给系统调度用：内存吃紧时整层清掉，磁盘缓存还在，回来时重新解码。 */
+internal fun trimAvatarMemory() {
+    avatarCache.evictAll()
+}
+
 private fun cacheFile(context: Context, url: String): File =
     File(File(context.filesDir, "avatars"), Integer.toHexString(url.hashCode()) + ".img")
 
